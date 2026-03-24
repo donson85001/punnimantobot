@@ -40,12 +40,23 @@ client.on('message', async (channel, tags, message, self) => {
     }
 
     if (message.startsWith('!新增點歌 ')) {
-      const query = message.replace('!新增點歌 ', '').trim();
-      const res = await fetch(`${API}?action=chat_add&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}`);
-      const text = await res.text();
-      if (text) client.say(channel, text);
-      return;
+  const query = message.replace('!新增點歌 ', '').trim();
+
+  // 🔥 只允許主播（broadcaster）
+  const isBroadcaster = tags.badges && tags.badges.broadcaster === '1';
+
+  if (!isBroadcaster) {
+    return; // 其他人直接無視
+  }
+
+  try {
+    const res = await fetch(`${API}?action=chat_add&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}`);
+    const text = await res.text();
+
+    if (text) {
+      client.say(channel, text);
     }
+    return;
   } catch (err) {
     console.error(err);
     client.say(channel, `@${user} 系統錯誤`);
