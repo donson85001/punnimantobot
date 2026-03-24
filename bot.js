@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 
 const CHANNEL = puruniii;
 const BOT_USERNAME = puruniiimantobot;
-const OAUTH_TOKEN = rgi3q86nk0nezbibdxzab2vwjilv7c;
+const OAUTH_TOKEN = 'rgi3q86nk0nezbibdxzab2vwjilv7c';
 const API = process.env.API;
 
 const client = new tmi.Client({
