@@ -1,10 +1,10 @@
 import tmi from 'tmi.js';
 import fetch from 'node-fetch';
 
-const CHANNEL = 'puruniiimantobot';
-const BOT_USERNAME = 'puruniiimantobot';
-const OAUTH_TOKEN = 'oauth:rgi3q86nk0nezbibdxzab2vwjilv7c';
-const API = 'https://script.google.com/macros/s/AKfycbyYtmScie8UdJCMVw9cvd_iX54wYADQbfNaKx8Ip2rfUHYZEI3ry2DG6LlKye9mcjSl/exec';
+const CHANNEL = process.env.CHANNEL;
+const BOT_USERNAME = process.env.BOT_USERNAME;
+const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
+const API = process.env.API;
 
 const client = new tmi.Client({
   options: { debug: true },
