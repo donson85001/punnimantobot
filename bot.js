@@ -1,3 +1,21 @@
+let saySeq = 0;
+
+function makeUniqueChatText(text) {
+  saySeq += 1;
+
+  // 用零寬字元，畫面看不出來，但字串不同
+  const invisibleMarks = [
+    '\u200B', // zero width space
+    '\u200C', // zero width non-joiner
+    '\u200D', // zero width joiner
+    '\u2060'  // word joiner
+  ];
+
+  const mark = invisibleMarks[saySeq % invisibleMarks.length];
+  const repeat = 1 + (saySeq % 3);
+
+  return text + mark.repeat(repeat);
+}
 import tmi from 'tmi.js';
 import fetch from 'node-fetch';
 
@@ -74,16 +92,11 @@ async function callApiAndReply(channel, user, url) {
 
     if (!text) return;
 
-    // 忙碌中：每次做成不同文字，避免 Twitch 吃重複訊息
-    if (text.includes('忙碌中')) {
-      client.say(channel, makeUniqueBusyMessage(text));
-      return;
-    }
-
-    client.say(channel, text);
+    // 所有訊息都做成唯一，避免 Twitch 吃重複
+    client.say(channel, makeUniqueChatText(text));
   } catch (err) {
     console.error('API error:', err);
-    client.say(channel, `@${user} 系統錯誤`);
+    client.say(channel, makeUniqueChatText(`@${user} 系統錯誤`));
   }
 }
 
