@@ -18,7 +18,7 @@ const client = new tmi.Client({
 client.connect();
 
 client.on('message', async (channel, tags, message, self) => {
-  if (self) return;
+  //if (self) return;
 
   const user = tags.username;
 
