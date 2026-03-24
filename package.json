@@ -1,0 +1,13 @@
+{
+  "name": "puni-twitch-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "tmi.js": "^1.8.5"
+  }
+}
