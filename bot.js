@@ -1,9 +1,9 @@
 import tmi from 'tmi.js';
 import fetch from 'node-fetch';
 
-const CHANNEL = process.env.CHANNEL;
-const BOT_USERNAME = process.env.BOT_USERNAME;
-const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
+const CHANNEL = puruniii;
+const BOT_USERNAME = puruniiimantobot;
+const OAUTH_TOKEN = thpwnsgjo1x7rvd8qpd1wcgdcjxths;
 const API = process.env.API;
 
 const client = new tmi.Client({
