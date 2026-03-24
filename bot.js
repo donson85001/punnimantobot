@@ -21,32 +21,12 @@ client.on('connected', (address, port) => {
   console.log(`Connected to ${address}:${port}`);
 });
 
-// ===== 排隊機制：一次只送一筆到 GAS =====
+// ===== 指令排隊：一次只送一筆到 GAS，減少撞鎖 =====
 const requestQueue = [];
 let isProcessingQueue = false;
 
-// ===== 避免 Twitch 吃掉相同訊息 =====
-const recentReplyCount = new Map(); // key: 原始文字, value: 次數
-const recentReplyTimer = new Map();
-
-function makeVisibleUniqueText(text) {
-  const base = String(text || '').trim();
-  const count = (recentReplyCount.get(base) || 0) + 1;
-  recentReplyCount.set(base, count);
-
-  // 10 秒後把這句的計數清掉，避免數字一直變大
-  if (recentReplyTimer.has(base)) {
-    clearTimeout(recentReplyTimer.get(base));
-  }
-  recentReplyTimer.set(
-    base,
-    setTimeout(() => {
-      recentReplyCount.delete(base);
-      recentReplyTimer.delete(base);
-    }, 10000)
-  );
-
-  return `${base}【${count}】`;
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function enqueueTask(task) {
@@ -70,17 +50,37 @@ async function processQueue() {
       }
 
       // 稍微停一下，避免太密集撞 GAS / Twitch
-      await sleep(250);
+      await sleep(220);
     }
   } finally {
     isProcessingQueue = false;
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+// ===== 可愛顏文字：避免 Twitch 擋重複訊息 =====
+let emoIndex = 0;
+
+const cuteFaces = [
+  '(๑•̀ㅂ•́)و✧',
+  '(｡•̀ᴗ-)✧',
+  '(≧▽≦)',
+  '(๑˃̵ᴗ˂̵)و',
+  '(｡•ㅅ•｡)♡',
+  '(づ｡◕‿‿◕｡)づ',
+  '(๑>◡<๑)',
+  '(｡♥‿♥｡)',
+  '(๑´ڡ`๑)',
+  '(≧ω≦)'
+];
+
+function makeVisibleUniqueText(text) {
+  const base = String(text || '').trim();
+  const face = cuteFaces[emoIndex % cuteFaces.length];
+  emoIndex += 1;
+  return `${base} ${face}`;
 }
 
+// ===== 呼叫 GAS 並回聊天室 =====
 async function callApiAndReply(channel, user, url) {
   try {
     const res = await fetch(url);
@@ -88,7 +88,6 @@ async function callApiAndReply(channel, user, url) {
 
     if (!text) return;
 
-    // 所有回覆都做成「可見但簡短」的唯一文字
     client.say(channel, makeVisibleUniqueText(text));
   } catch (err) {
     console.error('API error:', err);
@@ -96,12 +95,14 @@ async function callApiAndReply(channel, user, url) {
   }
 }
 
+// ===== 監聽聊天室 =====
 client.on('message', async (channel, tags, message, self) => {
   if (self) return;
 
   const user = tags.username;
   const msg = String(message || '').trim();
 
+  // !點歌 歌名
   if (msg.startsWith('!點歌 ')) {
     const query = msg.replace('!點歌 ', '').trim();
 
@@ -112,6 +113,7 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
+  // !點歌# 1
   if (msg.startsWith('!點歌#')) {
     const n = msg.replace('!點歌#', '').trim();
 
@@ -122,11 +124,14 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
+  // !新增點歌 歌名（只限主播）
   if (msg.startsWith('!新增點歌 ')) {
     const query = msg.replace('!新增點歌 ', '').trim();
     const isBroadcaster = tags.badges && tags.badges.broadcaster === '1';
 
-    if (!isBroadcaster) return;
+    if (!isBroadcaster) {
+      return;
+    }
 
     enqueueTask(async () => {
       const url = `${API}?action=chat_add&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}`;
