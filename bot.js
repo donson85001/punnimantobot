@@ -1,10 +1,27 @@
 import tmi from 'tmi.js';
 import fetch from 'node-fetch';
 
-const CHANNEL = process.env.CHANNEL;
+// ===== 環境變數 =====
 const BOT_USERNAME = process.env.BOT_USERNAME;
 const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
 const API = process.env.API;
+
+// 支援多頻道：Railway 設 CHANNELS=channel1,channel2
+const CHANNELS = (process.env.CHANNELS || process.env.CHANNEL || '')
+  .split(',')
+  .map(s => s.trim().replace(/^#/, '').toLowerCase())
+  .filter(Boolean);
+
+// 可使用 !新增點歌 的白名單帳號
+// Railway 可設：ADD_SONG_USERS=donson85001,another_user
+const ADD_SONG_USERS = (process.env.ADD_SONG_USERS || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
+if (!BOT_USERNAME || !OAUTH_TOKEN || !API || CHANNELS.length === 0) {
+  throw new Error('缺少必要環境變數：BOT_USERNAME / OAUTH_TOKEN / API / CHANNELS');
+}
 
 const client = new tmi.Client({
   options: { debug: true },
@@ -12,13 +29,14 @@ const client = new tmi.Client({
     username: BOT_USERNAME,
     password: OAUTH_TOKEN
   },
-  channels: [CHANNEL]
+  channels: CHANNELS
 });
 
 client.connect();
 
 client.on('connected', (address, port) => {
   console.log(`Connected to ${address}:${port}`);
+  console.log('Joined channels:', CHANNELS.join(', '));
 });
 
 // ===== 指令排隊：一次只送一筆到 GAS，減少撞鎖 =====
@@ -49,7 +67,6 @@ async function processQueue() {
         console.error('Task error:', err);
       }
 
-      // 稍微停一下，避免太密集撞 GAS / Twitch
       await sleep(220);
     }
   } finally {
@@ -80,6 +97,18 @@ function makeVisibleUniqueText(text) {
   return `${base} ${face}`;
 }
 
+// ===== 權限判斷 =====
+function isAddSongAllowed(tags) {
+  const badges = tags.badges || {};
+  const username = String(tags.username || '').toLowerCase();
+
+  const isBroadcaster = badges.broadcaster === '1';
+  const isMod = !!tags.mod;
+  const isWhitelisted = ADD_SONG_USERS.includes(username);
+
+  return isBroadcaster || isMod || isWhitelisted;
+}
+
 // ===== 呼叫 GAS 並回聊天室 =====
 async function callApiAndReply(channel, user, url) {
   try {
@@ -107,7 +136,7 @@ client.on('message', async (channel, tags, message, self) => {
     const query = msg.replace('!點歌 ', '').trim();
 
     enqueueTask(async () => {
-      const url = `${API}?action=chat_suggest&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}`;
+      const url = `${API}?action=chat_suggest&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}&channel=${encodeURIComponent(channel.replace('#', ''))}`;
       await callApiAndReply(channel, user, url);
     });
     return;
@@ -118,23 +147,22 @@ client.on('message', async (channel, tags, message, self) => {
     const n = msg.replace('!點歌#', '').trim();
 
     enqueueTask(async () => {
-      const url = `${API}?action=chat_pick&user=${encodeURIComponent(user)}&n=${encodeURIComponent(n)}`;
+      const url = `${API}?action=chat_pick&user=${encodeURIComponent(user)}&n=${encodeURIComponent(n)}&channel=${encodeURIComponent(channel.replace('#', ''))}`;
       await callApiAndReply(channel, user, url);
     });
     return;
   }
 
-  // !新增點歌 歌名（只限主播）
+  // !新增點歌 歌名（主播 / mod / 白名單）
   if (msg.startsWith('!新增點歌 ')) {
     const query = msg.replace('!新增點歌 ', '').trim();
-    const isBroadcaster = tags.badges && tags.badges.broadcaster === '1';
 
-    if (!isBroadcaster) {
+    if (!isAddSongAllowed(tags)) {
       return;
     }
 
     enqueueTask(async () => {
-      const url = `${API}?action=chat_add&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}`;
+      const url = `${API}?action=chat_add&user=${encodeURIComponent(user)}&q=${encodeURIComponent(query)}&channel=${encodeURIComponent(channel.replace('#', ''))}`;
       await callApiAndReply(channel, user, url);
     });
     return;
