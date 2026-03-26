@@ -74,28 +74,6 @@ async function processQueue() {
   }
 }
 
-// ===== 可愛顏文字：避免 Twitch 擋重複訊息 =====
-let emoIndex = 0;
-
-const cuteFaces = [
-  '(๑•̀ㅂ•́)و✧',
-  '(｡•̀ᴗ-)✧',
-  '(≧▽≦)',
-  '(๑˃̵ᴗ˂̵)و',
-  '(｡•ㅅ•｡)♡',
-  '(づ｡◕‿‿◕｡)づ',
-  '(๑>◡<๑)',
-  '(｡♥‿♥｡)',
-  '(๑´ڡ`๑)',
-  '(≧ω≦)'
-];
-
-function makeVisibleUniqueText(text) {
-  const base = String(text || '').trim();
-  const face = cuteFaces[emoIndex % cuteFaces.length];
-  emoIndex += 1;
-  return `${base} ${face}`;
-}
 
 // ===== 權限判斷 =====
 function isAddSongAllowed(tags) {
