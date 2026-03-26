@@ -95,10 +95,10 @@ async function callApiAndReply(channel, user, url) {
 
     if (!text) return;
 
-    client.say(channel, makeVisibleUniqueText(text));
+    client.say(channel, text);
   } catch (err) {
     console.error('API error:', err);
-    client.say(channel, makeVisibleUniqueText(`@${user} 系統錯誤`));
+    client.say(channel, `@${user} 系統錯誤`);
   }
 }
 
