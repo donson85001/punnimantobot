@@ -90,12 +90,20 @@ function isAddSongAllowed(tags) {
 // ===== 呼叫 GAS 並回聊天室 =====
 async function callApiAndReply(channel, user, url) {
   try {
+    console.log('API URL =', url);
+
     const res = await fetch(url);
     const text = (await res.text()).trim();
 
-    if (!text) return;
+    console.log('GAS response =', text);
 
-    client.say(channel, text);
+    if (!text) {
+      console.log('GAS response is empty, skip sending.');
+      return;
+    }
+
+    console.log('Sending to chat:', channel, text);
+    await client.say(channel, text);
   } catch (err) {
     console.error('API error:', err);
     client.say(channel, `@${user} 系統錯誤`);
