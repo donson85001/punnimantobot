@@ -2,12 +2,12 @@ import tmi from 'tmi.js';
 
 const CHANNELS = (process.env.CHANNELS || process.env.CHANNEL || '')
   .split(',')
-  .map(s => s.trim())
+  .map(s => s.trim().toLowerCase())
   .filter(Boolean);
 
-const BOT_USERNAME = process.env.BOT_USERNAME;
-const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
-const API = process.env.API;
+const BOT_USERNAME = String(process.env.BOT_USERNAME || '').trim();
+const OAUTH_TOKEN = String(process.env.OAUTH_TOKEN || '').trim();
+const API = String(process.env.API || '').trim();
 
 const ADD_SONG_USERS = (process.env.ADD_SONG_USERS || 'puruniii,manto__1109,puruniiimantobot')
   .split(',')
@@ -37,7 +37,7 @@ const client = new tmi.Client({
 });
 
 /* =========================
-   指令排隊：一次只送一筆，減少撞鎖
+   佇列：一次只送一筆到 GAS
 ========================= */
 
 const requestQueue = [];
@@ -49,7 +49,9 @@ function sleep(ms) {
 
 function enqueueTask(task) {
   requestQueue.push(task);
-  processQueue().catch(err => console.error('Queue error:', err));
+  processQueue().catch(err => {
+    console.error('Queue error:', err);
+  });
 }
 
 async function processQueue() {
@@ -67,7 +69,7 @@ async function processQueue() {
         console.error('Task error:', err);
       }
 
-      await sleep(220);
+      await sleep(250);
     }
   } finally {
     isProcessingQueue = false;
@@ -75,7 +77,7 @@ async function processQueue() {
 }
 
 /* =========================
-   避免 Twitch 重複訊息擋住
+   Twitch 重複訊息避擋
 ========================= */
 
 let msgSerial = 1;
@@ -95,6 +97,10 @@ function makeVisibleUniqueText(text) {
    工具
 ========================= */
 
+function getRoomFromChannel(channel) {
+  return String(channel || '').replace(/^#/, '').trim().toLowerCase();
+}
+
 function isAllowedAddSongUser(tags) {
   const user = String(tags?.username || '').trim().toLowerCase();
   const isBroadcaster = tags?.badges?.broadcaster === '1';
@@ -112,6 +118,15 @@ async function callApi(url) {
   return text;
 }
 
+async function replyToChat(channel, text) {
+  const finalText = makeVisibleUniqueText(text);
+  if (!finalText) return null;
+
+  const sayResult = await client.say(channel, finalText);
+  console.log('Reply sent =', { channel, finalText, sayResult });
+  return sayResult;
+}
+
 async function callApiAndReply(channel, user, url) {
   try {
     console.log('API request =', url);
@@ -124,21 +139,13 @@ async function callApiAndReply(channel, user, url) {
       return;
     }
 
-    const finalText = makeVisibleUniqueText(text);
-    if (!finalText) return;
-
-    const sayResult = await client.say(channel, finalText);
-    console.log('Reply sent =', { channel, finalText, sayResult });
+    await replyToChat(channel, text);
   } catch (err) {
     console.error('API error:', err);
     console.error('API error detail:', err?.message, err?.stack);
 
     try {
-      const fallback = makeVisibleUniqueText(`@${user} 系統錯誤`);
-      if (fallback) {
-        const sayResult = await client.say(channel, fallback);
-        console.log('Fallback reply sent =', { channel, fallback, sayResult });
-      }
+      await replyToChat(channel, `@${user} 系統錯誤`);
     } catch (sayErr) {
       console.error('Reply fallback error:', sayErr);
       console.error('Reply fallback detail:', sayErr?.message, sayErr?.stack);
@@ -164,28 +171,37 @@ async function runStartupHealthCheck() {
 client.on('message', async (channel, tags, message, self) => {
   const user = String(tags?.username || '').trim();
   const msg = String(message || '').trim();
+  const room = getRoomFromChannel(channel);
 
   if (!user || !msg) return;
 
   console.log('message event =', {
     channel,
+    room,
     user,
     msg,
     self
   });
 
-  // 避免 bot 自己的回覆訊息再次觸發
-  if (self && !msg.startsWith('!點歌') && !msg.startsWith('!新增點歌')) {
+  // 防止 bot 自己送出的回覆再被自己觸發
+  if (
+    self &&
+    !msg.startsWith('!點歌 ') &&
+    !msg.startsWith('!點歌#') &&
+    !msg.startsWith('!新增點歌 ')
+  ) {
     return;
   }
 
+  // !點歌 歌名
   if (msg.startsWith('!點歌 ')) {
-    const query = msg.replace('!點歌 ', '').trim();
+    const query = msg.slice('!點歌 '.length).trim();
     if (!query) return;
 
     enqueueTask(async () => {
       const url =
         `${API}?action=chat_suggest` +
+        `&room=${encodeURIComponent(room)}` +
         `&user=${encodeURIComponent(user)}` +
         `&q=${encodeURIComponent(query)}`;
 
@@ -194,13 +210,15 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
+  // !點歌# 1
   if (msg.startsWith('!點歌#')) {
-    const n = msg.replace('!點歌#', '').trim();
+    const n = msg.slice('!點歌#'.length).trim();
     if (!n) return;
 
     enqueueTask(async () => {
       const url =
         `${API}?action=chat_pick` +
+        `&room=${encodeURIComponent(room)}` +
         `&user=${encodeURIComponent(user)}` +
         `&n=${encodeURIComponent(n)}`;
 
@@ -209,18 +227,20 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
+  // !新增點歌 歌名
   if (msg.startsWith('!新增點歌 ')) {
-    const query = msg.replace('!新增點歌 ', '').trim();
+    const query = msg.slice('!新增點歌 '.length).trim();
     if (!query) return;
 
     if (!isAllowedAddSongUser(tags)) {
-      console.log('!新增點歌 blocked user =', user);
+      console.log('!新增點歌 blocked user =', { room, user });
       return;
     }
 
     enqueueTask(async () => {
       const url =
         `${API}?action=chat_add` +
+        `&room=${encodeURIComponent(room)}` +
         `&user=${encodeURIComponent(user)}` +
         `&q=${encodeURIComponent(query)}`;
 
@@ -231,12 +251,13 @@ client.on('message', async (channel, tags, message, self) => {
 });
 
 /* =========================
-   連線 / 除錯事件
+   事件 / 除錯
 ========================= */
 
 client.on('connected', async (address, port) => {
   console.log(`Connected to ${address}:${port}`);
   console.log('CHANNELS =', CHANNELS.join(', '));
+  console.log('BOT_USERNAME =', BOT_USERNAME);
   console.log('API =', API);
 
   await runStartupHealthCheck();
