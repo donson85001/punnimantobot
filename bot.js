@@ -67,9 +67,11 @@ async function processQueue() {
         await task();
       } catch (err) {
         console.error('Task error:', err);
+        console.error('Task error detail:', err?.message, err?.stack);
       }
 
-      await sleep(250);
+      // 放慢一點，降低 Twitch 連續發話被吃掉的機率
+      await sleep(800);
     }
   } finally {
     isProcessingQueue = false;
@@ -122,9 +124,27 @@ async function replyToChat(channel, text) {
   const finalText = makeVisibleUniqueText(text);
   if (!finalText) return null;
 
-  const sayResult = await client.say(channel, finalText);
-  console.log('Reply sent =', { channel, finalText, sayResult });
-  return sayResult;
+  try {
+    const sayResult = await client.say(channel, finalText);
+    console.log('Reply sent =', { channel, finalText, sayResult });
+    return sayResult;
+  } catch (err1) {
+    console.error('Reply send failed (1st):', err1);
+    console.error('Reply send failed detail (1st):', err1?.message, err1?.stack);
+
+    await sleep(1200);
+
+    try {
+      const retryText = makeVisibleUniqueText(text);
+      const sayResult2 = await client.say(channel, retryText);
+      console.log('Reply sent retry =', { channel, retryText, sayResult2 });
+      return sayResult2;
+    } catch (err2) {
+      console.error('Reply send failed (2nd):', err2);
+      console.error('Reply send failed detail (2nd):', err2?.message, err2?.stack);
+      throw err2;
+    }
+  }
 }
 
 async function callApiAndReply(channel, user, url) {
@@ -183,7 +203,7 @@ client.on('message', async (channel, tags, message, self) => {
     self
   });
 
-  // 防止 bot 自己送出的回覆再被自己觸發
+  // 防止 bot 自己送出的回覆再被自己吃到
   if (
     self &&
     !msg.startsWith('!點歌 ') &&
