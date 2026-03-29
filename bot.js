@@ -102,7 +102,11 @@ function makeVisibleUniqueText(text) {
 function getRoomFromChannel(channel) {
   return String(channel || '').replace(/^#/, '').trim().toLowerCase();
 }
-
+function cleanQuery(q) {
+  return String(q || '')
+    .replace(/[，。！？、,.!?]+$/g, '')
+    .trim();
+}
 function isAllowedAddSongUser(tags) {
   const user = String(tags?.username || '').trim().toLowerCase();
   const isBroadcaster = tags?.badges?.broadcaster === '1';
@@ -214,12 +218,9 @@ client.on('message', async (channel, tags, message, self) => {
   }
 
   // !點歌 歌名
-  if (msg.startsWith('!點歌 ')) {
-    function cleanQuery(q) {
-  return String(q || '')
-    .replace(/[，。！？、,.!?]+$/g, '') // 移除尾巴標點
-    .trim();
-}
+    if (msg.startsWith('!點歌 ')) {
+    const raw = msg.slice('!點歌 '.length);
+    const query = cleanQuery(raw);
     if (!query) return;
 
     enqueueTask(async () => {
@@ -253,7 +254,8 @@ client.on('message', async (channel, tags, message, self) => {
 
   // !新增點歌 歌名
   if (msg.startsWith('!新增點歌 ')) {
-    const query = msg.slice('!新增點歌 '.length).trim();
+    const raw = msg.slice('!新增點歌 '.length);
+    const query = cleanQuery(raw);
     if (!query) return;
 
     if (!isAllowedAddSongUser(tags)) {
