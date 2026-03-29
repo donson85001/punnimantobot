@@ -1,5 +1,4 @@
 import tmi from 'tmi.js';
-import fetch from 'node-fetch';
 
 const CHANNELS = (process.env.CHANNELS || process.env.CHANNEL || '')
   .split(',')
@@ -36,14 +35,6 @@ const client = new tmi.Client({
     password: OAUTH_TOKEN
   },
   channels: CHANNELS
-});
-
-client.connect();
-
-client.on('connected', (address, port) => {
-  console.log(`Connected to ${address}:${port}`);
-  console.log('CHANNELS =', CHANNELS.join(', '));
-  console.log('API =', API);
 });
 
 /* =========================
@@ -92,9 +83,12 @@ let msgSerial = 1;
 
 function makeVisibleUniqueText(text) {
   const base = String(text || '').trim();
+  if (!base) return '';
+
   const serial = `[${msgSerial}]`;
   msgSerial += 1;
   if (msgSerial > 9999) msgSerial = 1;
+
   return `${base} ${serial}`;
 }
 
@@ -121,14 +115,32 @@ async function callApi(url) {
 
 async function callApiAndReply(channel, user, url) {
   try {
+    console.log('API request =', url);
+
     const text = await callApi(url);
+    console.log('API response =', text);
 
-    if (!text) return;
+    if (!text) {
+      console.log('API response empty, skip reply');
+      return;
+    }
 
-    client.say(channel, makeVisibleUniqueText(text));
+    const finalText = makeVisibleUniqueText(text);
+    if (!finalText) return;
+
+    await client.say(channel, finalText);
+    console.log('Reply sent =', finalText);
   } catch (err) {
     console.error('API error:', err);
-    client.say(channel, makeVisibleUniqueText(`@${user} 系統錯誤`));
+
+    try {
+      const fallback = makeVisibleUniqueText(`@${user} 系統錯誤`);
+      if (fallback) {
+        await client.say(channel, fallback);
+      }
+    } catch (sayErr) {
+      console.error('Reply fallback error:', sayErr);
+    }
   }
 }
 
@@ -146,19 +158,27 @@ async function runStartupHealthCheck() {
   }
 }
 
-runStartupHealthCheck();
-
 /* =========================
    指令監聽
 ========================= */
 
 client.on('message', async (channel, tags, message, self) => {
-  if (self) returif (self && String(tags?.username || '').trim().toLowerCase() !== BOT_USERNAME.toLowerCase()) return;n;
-
   const user = String(tags?.username || '').trim();
   const msg = String(message || '').trim();
 
   if (!user || !msg) return;
+
+  console.log('message event =', {
+    channel,
+    user,
+    msg,
+    self
+  });
+
+  // 只忽略 bot 自己送出的非指令訊息，避免回覆被自己再次觸發
+  if (self && !msg.startsWith('!點歌') && !msg.startsWith('!新增點歌')) {
+    return;
+  }
 
   // !點歌 歌名
   if (msg.startsWith('!點歌 ')) {
@@ -198,6 +218,7 @@ client.on('message', async (channel, tags, message, self) => {
     if (!query) return;
 
     if (!isAllowedAddSongUser(tags)) {
+      console.log('!新增點歌 blocked user =', user);
       return;
     }
 
@@ -211,4 +232,37 @@ client.on('message', async (channel, tags, message, self) => {
     });
     return;
   }
+});
+
+/* =========================
+   連線事件
+========================= */
+
+client.on('connected', async (address, port) => {
+  console.log(`Connected to ${address}:${port}`);
+  console.log('CHANNELS =', CHANNELS.join(', '));
+  console.log('API =', API);
+
+  await runStartupHealthCheck();
+});
+
+client.on('disconnected', reason => {
+  console.error('Disconnected:', reason);
+});
+
+client.on('reconnect', () => {
+  console.log('Reconnecting...');
+});
+
+client.on('connected', () => {
+  console.log('Bot connected successfully');
+});
+
+/* =========================
+   啟動
+========================= */
+
+client.connect().catch(err => {
+  console.error('TMI connect failed:', err);
+  process.exit(1);
 });
