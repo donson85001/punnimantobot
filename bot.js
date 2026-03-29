@@ -215,7 +215,11 @@ client.on('message', async (channel, tags, message, self) => {
 
   // !點歌 歌名
   if (msg.startsWith('!點歌 ')) {
-    const query = msg.slice('!點歌 '.length).trim();
+    function cleanQuery(q) {
+  return String(q || '')
+    .replace(/[，。！？、,.!?]+$/g, '') // 移除尾巴標點
+    .trim();
+}
     if (!query) return;
 
     enqueueTask(async () => {
