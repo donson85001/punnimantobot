@@ -153,7 +153,7 @@ runStartupHealthCheck();
 ========================= */
 
 client.on('message', async (channel, tags, message, self) => {
-  if (self) return;
+  if (self) returif (self && String(tags?.username || '').trim().toLowerCase() !== BOT_USERNAME.toLowerCase()) return;n;
 
   const user = String(tags?.username || '').trim();
   const msg = String(message || '').trim();
