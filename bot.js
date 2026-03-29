@@ -9,7 +9,6 @@ const BOT_USERNAME = process.env.BOT_USERNAME;
 const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
 const API = process.env.API;
 
-// 允許使用 !新增點歌 的帳號
 const ADD_SONG_USERS = (process.env.ADD_SONG_USERS || 'puruniii,manto__1109,puruniiimantobot')
   .split(',')
   .map(s => s.trim().toLowerCase())
@@ -128,25 +127,24 @@ async function callApiAndReply(channel, user, url) {
     const finalText = makeVisibleUniqueText(text);
     if (!finalText) return;
 
-    await client.say(channel, finalText);
-    console.log('Reply sent =', finalText);
+    const sayResult = await client.say(channel, finalText);
+    console.log('Reply sent =', { channel, finalText, sayResult });
   } catch (err) {
     console.error('API error:', err);
+    console.error('API error detail:', err?.message, err?.stack);
 
     try {
       const fallback = makeVisibleUniqueText(`@${user} 系統錯誤`);
       if (fallback) {
-        await client.say(channel, fallback);
+        const sayResult = await client.say(channel, fallback);
+        console.log('Fallback reply sent =', { channel, fallback, sayResult });
       }
     } catch (sayErr) {
       console.error('Reply fallback error:', sayErr);
+      console.error('Reply fallback detail:', sayErr?.message, sayErr?.stack);
     }
   }
 }
-
-/* =========================
-   啟動自我檢查
-========================= */
 
 async function runStartupHealthCheck() {
   try {
@@ -155,6 +153,7 @@ async function runStartupHealthCheck() {
     console.log('Health check result =', text);
   } catch (err) {
     console.error('Health check failed:', err);
+    console.error('Health check detail:', err?.message, err?.stack);
   }
 }
 
@@ -175,12 +174,11 @@ client.on('message', async (channel, tags, message, self) => {
     self
   });
 
-  // 只忽略 bot 自己送出的非指令訊息，避免回覆被自己再次觸發
+  // 避免 bot 自己的回覆訊息再次觸發
   if (self && !msg.startsWith('!點歌') && !msg.startsWith('!新增點歌')) {
     return;
   }
 
-  // !點歌 歌名
   if (msg.startsWith('!點歌 ')) {
     const query = msg.replace('!點歌 ', '').trim();
     if (!query) return;
@@ -196,7 +194,6 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
-  // !點歌# 1
   if (msg.startsWith('!點歌#')) {
     const n = msg.replace('!點歌#', '').trim();
     if (!n) return;
@@ -212,7 +209,6 @@ client.on('message', async (channel, tags, message, self) => {
     return;
   }
 
-  // !新增點歌 歌名
   if (msg.startsWith('!新增點歌 ')) {
     const query = msg.replace('!新增點歌 ', '').trim();
     if (!query) return;
@@ -235,7 +231,7 @@ client.on('message', async (channel, tags, message, self) => {
 });
 
 /* =========================
-   連線事件
+   連線 / 除錯事件
 ========================= */
 
 client.on('connected', async (address, port) => {
@@ -246,16 +242,24 @@ client.on('connected', async (address, port) => {
   await runStartupHealthCheck();
 });
 
+client.on('join', (channel, username, self) => {
+  console.log('JOIN EVENT =', { channel, username, self });
+});
+
+client.on('part', (channel, username, self) => {
+  console.log('PART EVENT =', { channel, username, self });
+});
+
+client.on('notice', (channel, msgid, message) => {
+  console.log('NOTICE EVENT =', { channel, msgid, message });
+});
+
 client.on('disconnected', reason => {
   console.error('Disconnected:', reason);
 });
 
 client.on('reconnect', () => {
   console.log('Reconnecting...');
-});
-
-client.on('connected', () => {
-  console.log('Bot connected successfully');
 });
 
 /* =========================
