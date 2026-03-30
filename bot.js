@@ -14,18 +14,10 @@ const ADD_SONG_USERS = (process.env.ADD_SONG_USERS || 'puruniii,manto__1109,puru
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
 
-if (!CHANNELS.length) {
-  throw new Error('缺少 CHANNELS 或 CHANNEL 環境變數');
-}
-if (!BOT_USERNAME) {
-  throw new Error('缺少 BOT_USERNAME 環境變數');
-}
-if (!OAUTH_TOKEN) {
-  throw new Error('缺少 OAUTH_TOKEN 環境變數');
-}
-if (!API) {
-  throw new Error('缺少 API 環境變數');
-}
+if (!CHANNELS.length) throw new Error('缺少 CHANNELS');
+if (!BOT_USERNAME) throw new Error('缺少 BOT_USERNAME');
+if (!OAUTH_TOKEN) throw new Error('缺少 OAUTH_TOKEN');
+if (!API) throw new Error('缺少 API');
 
 const client = new tmi.Client({
   options: { debug: true },
@@ -37,283 +29,175 @@ const client = new tmi.Client({
 });
 
 /* =========================
-   佇列：一次只送一筆到 GAS
+   工具
 ========================= */
-
-const requestQueue = [];
-let isProcessingQueue = false;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function enqueueTask(task) {
-  requestQueue.push(task);
-  processQueue().catch(err => {
-    console.error('Queue error:', err);
-  });
+function getRoom(channel) {
+  return channel.replace('#', '');
 }
 
-async function processQueue() {
-  if (isProcessingQueue) return;
-  isProcessingQueue = true;
-
-  try {
-    while (requestQueue.length > 0) {
-      const task = requestQueue.shift();
-      if (!task) continue;
-
-      try {
-        await task();
-      } catch (err) {
-        console.error('Task error:', err);
-        console.error('Task error detail:', err?.message, err?.stack);
-      }
-
-      // 放慢一點，降低 Twitch 連續發話被吃掉的機率
-      await sleep(800);
-    }
-  } finally {
-    isProcessingQueue = false;
-  }
-}
-
-/* =========================
-   Twitch 重複訊息避擋
-========================= */
-
-let msgSerial = 1;
-
-function makeVisibleUniqueText(text) {
-  const base = String(text || '').trim();
-  if (!base) return '';
-
-  const serial = `[${msgSerial}]`;
-  msgSerial += 1;
-  if (msgSerial > 9999) msgSerial = 1;
-
-  return `${base} ${serial}`;
-}
-
-/* =========================
-   工具
-========================= */
-
-function getRoomFromChannel(channel) {
-  return String(channel || '').replace(/^#/, '').trim().toLowerCase();
-}
 function cleanQuery(q) {
   return String(q || '')
     .replace(/[，。！？、,.!?]+$/g, '')
     .trim();
 }
+
 function isAllowedAddSongUser(tags) {
-  const user = String(tags?.username || '').trim().toLowerCase();
+  const user = String(tags?.username || '').toLowerCase();
   const isBroadcaster = tags?.badges?.broadcaster === '1';
   return isBroadcaster || ADD_SONG_USERS.includes(user);
 }
+
+/* =========================
+   API 呼叫
+========================= */
 
 async function callApi(url) {
   const res = await fetch(url);
   const text = (await res.text()).trim();
 
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`HTTP ${res.status}`);
   }
 
   return text;
 }
 
-async function replyToChat(channel, text) {
-  const finalText = makeVisibleUniqueText(text);
-  if (!finalText) return null;
+async function safeReply(channel, text) {
+  if (!text) return;
 
   try {
-    const sayResult = await client.say(channel, finalText);
-    console.log('Reply sent =', { channel, finalText, sayResult });
-    return sayResult;
-  } catch (err1) {
-    console.error('Reply send failed (1st):', err1);
-    console.error('Reply send failed detail (1st):', err1?.message, err1?.stack);
-
+    await client.say(channel, text);
+    console.log('Reply:', text);
+  } catch (e) {
+    console.log('Retry reply...');
     await sleep(1200);
-
     try {
-      const retryText = makeVisibleUniqueText(text);
-      const sayResult2 = await client.say(channel, retryText);
-      console.log('Reply sent retry =', { channel, retryText, sayResult2 });
-      return sayResult2;
-    } catch (err2) {
-      console.error('Reply send failed (2nd):', err2);
-      console.error('Reply send failed detail (2nd):', err2?.message, err2?.stack);
-      throw err2;
+      await client.say(channel, text);
+    } catch (err) {
+      console.error('Reply failed:', err);
     }
-  }
-}
-
-async function callApiAndReply(channel, user, url) {
-  try {
-    console.log('API request =', url);
-
-    const text = await callApi(url);
-    console.log('API response =', text);
-
-    if (!text) {
-      console.log('API response empty, skip reply');
-      return;
-    }
-
-    await replyToChat(channel, text);
-  } catch (err) {
-    console.error('API error:', err);
-    console.error('API error detail:', err?.message, err?.stack);
-
-    try {
-      await replyToChat(channel, `@${user} 系統錯誤`);
-    } catch (sayErr) {
-      console.error('Reply fallback error:', sayErr);
-      console.error('Reply fallback detail:', sayErr?.message, sayErr?.stack);
-    }
-  }
-}
-
-async function runStartupHealthCheck() {
-  try {
-    const url = `${API}?action=health`;
-    const text = await callApi(url);
-    console.log('Health check result =', text);
-  } catch (err) {
-    console.error('Health check failed:', err);
-    console.error('Health check detail:', err?.message, err?.stack);
   }
 }
 
 /* =========================
-   指令監聽
+   排隊（防撞鎖）
+========================= */
+
+const queue = [];
+let busy = false;
+
+function pushTask(fn) {
+  queue.push(fn);
+  runQueue();
+}
+
+async function runQueue() {
+  if (busy) return;
+  busy = true;
+
+  while (queue.length) {
+    const task = queue.shift();
+    try {
+      await task();
+    } catch (e) {
+      console.error('Task error:', e);
+    }
+    await sleep(800);
+  }
+
+  busy = false;
+}
+
+/* =========================
+   主邏輯
 ========================= */
 
 client.on('message', async (channel, tags, message, self) => {
-  const user = String(tags?.username || '').trim();
-  const msg = String(message || '').trim();
-  const room = getRoomFromChannel(channel);
+  if (self) return;
 
-  if (!user || !msg) return;
+  const user = tags.username;
+  const msg = message.trim();
+  const room = getRoom(channel);
 
-  console.log('message event =', {
-    channel,
-    room,
-    user,
-    msg,
-    self
-  });
+  console.log('MSG:', { channel, user, msg });
 
-  // 防止 bot 自己送出的回覆再被自己吃到
-  if (
-    self &&
-    !msg.startsWith('!點歌 ') &&
-    !msg.startsWith('!點歌#') &&
-    !msg.startsWith('!新增點歌 ')
-  ) {
-    return;
-  }
-
-  // !點歌 歌名
-    if (msg.startsWith('!點歌 ')) {
-    const raw = msg.slice('!點歌 '.length);
+  // !點歌
+  if (msg.startsWith('!點歌 ')) {
+    const raw = msg.slice(4);
     const query = cleanQuery(raw);
     if (!query) return;
 
-    enqueueTask(async () => {
+    pushTask(async () => {
       const url =
         `${API}?action=chat_suggest` +
         `&room=${encodeURIComponent(room)}` +
         `&user=${encodeURIComponent(user)}` +
         `&q=${encodeURIComponent(query)}`;
 
-      await callApiAndReply(channel, user, url);
+      const res = await callApi(url);
+      await safeReply(channel, res);
     });
+
     return;
   }
 
-  // !點歌# 1
+  // !點歌#
   if (msg.startsWith('!點歌#')) {
-    const n = msg.slice('!點歌#'.length).trim();
+    const n = msg.replace('!點歌#', '').trim();
     if (!n) return;
 
-    enqueueTask(async () => {
+    pushTask(async () => {
       const url =
         `${API}?action=chat_pick` +
         `&room=${encodeURIComponent(room)}` +
         `&user=${encodeURIComponent(user)}` +
         `&n=${encodeURIComponent(n)}`;
 
-      await callApiAndReply(channel, user, url);
+      const res = await callApi(url);
+      await safeReply(channel, res);
     });
+
     return;
   }
 
-  // !新增點歌 歌名
+  // !新增點歌
   if (msg.startsWith('!新增點歌 ')) {
-    const raw = msg.slice('!新增點歌 '.length);
+    const raw = msg.slice(6);
     const query = cleanQuery(raw);
     if (!query) return;
 
     if (!isAllowedAddSongUser(tags)) {
-      console.log('!新增點歌 blocked user =', { room, user });
+      console.log('Blocked add:', user);
       return;
     }
 
-    enqueueTask(async () => {
+    pushTask(async () => {
       const url =
         `${API}?action=chat_add` +
         `&room=${encodeURIComponent(room)}` +
         `&user=${encodeURIComponent(user)}` +
         `&q=${encodeURIComponent(query)}`;
 
-      await callApiAndReply(channel, user, url);
+      const res = await callApi(url);
+      await safeReply(channel, res);
     });
+
     return;
   }
 });
 
 /* =========================
-   事件 / 除錯
+   事件
 ========================= */
 
-client.on('connected', async (address, port) => {
-  console.log(`Connected to ${address}:${port}`);
-  console.log('CHANNELS =', CHANNELS.join(', '));
-  console.log('BOT_USERNAME =', BOT_USERNAME);
-  console.log('API =', API);
-
-  await runStartupHealthCheck();
+client.on('connected', (addr, port) => {
+  console.log(`Connected ${addr}:${port}`);
+  console.log('Channels:', CHANNELS);
 });
 
-client.on('join', (channel, username, self) => {
-  console.log('JOIN EVENT =', { channel, username, self });
-});
-
-client.on('part', (channel, username, self) => {
-  console.log('PART EVENT =', { channel, username, self });
-});
-
-client.on('notice', (channel, msgid, message) => {
-  console.log('NOTICE EVENT =', { channel, msgid, message });
-});
-
-client.on('disconnected', reason => {
-  console.error('Disconnected:', reason);
-});
-
-client.on('reconnect', () => {
-  console.log('Reconnecting...');
-});
-
-/* =========================
-   啟動
-========================= */
-
-client.connect().catch(err => {
-  console.error('TMI connect failed:', err);
-  process.exit(1);
-});
+client.connect();
