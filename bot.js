@@ -24,8 +24,14 @@ if (!BOT_USERNAME || !OAUTH_TOKEN || !API || !CHANNELS.length) {
 
 const API_TIMEOUT_MS = 9000;
 const SEND_GAP_MS = 900;
-let client;
+const IRC_STALE_MS = 3 * 60 * 1000;
+const WATCHDOG_MS = 30 * 1000;
+
+let client = null;
+let connecting = false;
+let lastIrcAt = Date.now();
 let lastSendAt = 0;
+let reconnecting = false;
 
 function clean(v) {
   return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -50,7 +56,7 @@ function buildUrl(action, params = {}) {
   return url.toString();
 }
 
-async function sleep(ms) {
+function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
@@ -75,7 +81,7 @@ async function apiGet(url) {
     if (isHtml(text)) return "系統忙碌中，請再試";
     if (text.startsWith("ERR:")) return "系統忙碌中，請再試";
 
-    return text.slice(0, 450);
+    return text.slice(0, 430);
   } catch (err) {
     console.error("API_ERROR", err?.name || err);
     return "系統忙碌中，請再試";
@@ -85,8 +91,10 @@ async function apiGet(url) {
 }
 
 async function say(channel, msg) {
-  const text = clean(msg).slice(0, 450);
-  if (!text || !client) return;
+  if (!client) return;
+
+  let text = clean(msg).slice(0, 430);
+  if (!text) return;
 
   const wait = Math.max(0, SEND_GAP_MS - (Date.now() - lastSendAt));
   if (wait) await sleep(wait);
@@ -129,17 +137,15 @@ async function handleCommand(channel, tags, message) {
     return;
   }
 
-  // 支援：!點歌# 1 / !點歌#1 / !點歌 #1 / !點歌 1
   let pick = text.match(/^!點歌#\s*([1-9])$/);
   if (!pick) pick = text.match(/^!點歌\s+#?([1-9])$/);
 
   if (pick) {
-    const url = buildUrl("chat_pick", {
+    const reply = await apiGet(buildUrl("chat_pick", {
       user,
       room,
       n: pick[1],
-    });
-    const reply = await apiGet(url);
+    }));
     await say(channel, reply);
     return;
   }
@@ -148,13 +154,11 @@ async function handleCommand(channel, tags, message) {
     const q = clean(text.slice("!點歌 ".length));
     if (!q) return;
 
-    const url = buildUrl("chat_suggest", {
+    const reply = await apiGet(buildUrl("chat_suggest", {
       user,
       room,
       q,
-    });
-
-    const reply = await apiGet(url);
+    }));
     await say(channel, reply);
     return;
   }
@@ -173,41 +177,90 @@ async function handleCommand(channel, tags, message) {
     const q = clean(text.slice("!新增點歌 ".length));
     if (!q) return;
 
-    const url = buildUrl("chat_add", {
+    const reply = await apiGet(buildUrl("chat_add", {
       user,
       room,
       q,
-    });
-
-    const reply = await apiGet(url);
+    }));
     await say(channel, reply);
   }
 }
 
-function startHttp() {
-  http.createServer((req, res) => {
-    if (req.url === "/" || req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({
-        ok: true,
-        bot: BOT_USERNAME,
-        channels: CHANNELS,
-        uptime: Math.floor(process.uptime()),
-        time: new Date().toISOString(),
-      }));
-      return;
-    }
+async function reconnect(reason) {
+  if (reconnecting || connecting) return;
+  reconnecting = true;
 
-    res.writeHead(404);
-    res.end("not found");
-  }).listen(PORT, () => {
-    console.log("HTTP_READY", PORT);
+  console.error("FORCE_RECONNECT", reason);
+
+  try {
+    if (client) {
+      client.removeAllListeners();
+      try {
+        await client.disconnect();
+      } catch {}
+    }
+  } catch {}
+
+  await sleep(3000);
+  reconnecting = false;
+  startBot();
+}
+
+function bindEvents(c) {
+  c.on("connected", (addr, port) => {
+    lastIrcAt = Date.now();
+    console.log("TWITCH_CONNECTED", addr, port);
+    console.log("JOINED", CHANNELS.join(","));
+  });
+
+  c.on("join", (channel, username, self) => {
+    lastIrcAt = Date.now();
+    if (self) console.log("SELF_JOIN", channel, username);
+  });
+
+  c.on("raw_message", () => {
+    lastIrcAt = Date.now();
+  });
+
+  c.on("message", async (channel, tags, message, self) => {
+    lastIrcAt = Date.now();
+    if (self) return;
+
+    const text = clean(message);
+    if (!text.startsWith("!")) return;
+
+    try {
+      await handleCommand(channel, tags, text);
+    } catch (err) {
+      console.error("COMMAND_FAIL", err?.stack || err);
+      await say(channel, `@${clean(tags?.username)} 系統忙碌中，請再試`);
+    }
+  });
+
+  c.on("notice", (channel, msgid, message) => {
+    lastIrcAt = Date.now();
+    console.log("NOTICE", roomOf(channel), msgid, message);
+  });
+
+  c.on("disconnected", reason => {
+    console.error("TWITCH_DISCONNECTED", reason);
+    reconnect("disconnected");
+  });
+
+  c.on("error", err => {
+    console.error("TWITCH_ERROR", err?.message || err);
   });
 }
 
 function startBot() {
+  if (connecting) return;
+  connecting = true;
+
   client = new tmi.Client({
-    options: { debug: true, messagesLogLevel: "info" },
+    options: {
+      debug: true,
+      messagesLogLevel: "info",
+    },
     connection: {
       reconnect: true,
       secure: true,
@@ -221,37 +274,50 @@ function startBot() {
     channels: CHANNELS.map(c => `#${c}`),
   });
 
-  client.on("connected", (addr, port) => {
-    console.log("TWITCH_CONNECTED", addr, port);
-    console.log("JOINED", CHANNELS.join(","));
-  });
+  bindEvents(client);
 
-  client.on("disconnected", reason => {
-    console.error("TWITCH_DISCONNECTED", reason);
-  });
+  client.connect()
+    .then(() => {
+      connecting = false;
+      lastIrcAt = Date.now();
+    })
+    .catch(err => {
+      connecting = false;
+      console.error("CONNECT_FAIL", err?.stack || err);
+      setTimeout(() => reconnect("connect_fail"), 5000);
+    });
+}
 
-  client.on("notice", (channel, msgid, message) => {
-    console.log("NOTICE", roomOf(channel), msgid, message);
-  });
-
-  client.on("message", async (channel, tags, message, self) => {
-    if (self) return;
-    const text = clean(message);
-    if (!text.startsWith("!")) return;
-
-    try {
-      await handleCommand(channel, tags, text);
-    } catch (err) {
-      console.error("COMMAND_FAIL", err?.stack || err);
-      await say(channel, `@${clean(tags?.username)} 系統忙碌中，請再試`);
+function startHttp() {
+  http.createServer((req, res) => {
+    if (req.url === "/" || req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok: true,
+        bot: BOT_USERNAME,
+        channels: CHANNELS,
+        ircIdleSec: Math.floor((Date.now() - lastIrcAt) / 1000),
+        uptime: Math.floor(process.uptime()),
+        time: new Date().toISOString(),
+      }));
+      return;
     }
-  });
 
-  client.connect().catch(err => {
-    console.error("CONNECT_FAIL", err?.stack || err);
-    process.exit(1);
+    res.writeHead(404);
+    res.end("not found");
+  }).listen(PORT, () => {
+    console.log("HTTP_READY", PORT);
   });
 }
+
+setInterval(() => {
+  const idle = Date.now() - lastIrcAt;
+  console.log("WATCHDOG", `ircIdle=${Math.floor(idle / 1000)}s`);
+
+  if (idle > IRC_STALE_MS) {
+    reconnect(`irc_stale_${Math.floor(idle / 1000)}s`);
+  }
+}, WATCHDOG_MS);
 
 process.on("uncaughtException", err => {
   console.error("UNCAUGHT", err?.stack || err);
