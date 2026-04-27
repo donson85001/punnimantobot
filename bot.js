@@ -24,14 +24,16 @@ if (!BOT_USERNAME || !OAUTH_TOKEN || !API || !CHANNELS.length) {
 
 const API_TIMEOUT_MS = 9000;
 const SEND_GAP_MS = 900;
-const IRC_STALE_MS = 3 * 60 * 1000;
+const CHAT_STALE_MS = 90 * 1000;
 const WATCHDOG_MS = 30 * 1000;
 
 let client = null;
 let connecting = false;
-let lastIrcAt = Date.now();
-let lastSendAt = 0;
 let reconnecting = false;
+
+let lastIrcAt = Date.now();
+let lastChatMsgAt = Date.now();
+let lastSendAt = 0;
 
 function clean(v) {
   return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -93,7 +95,7 @@ async function apiGet(url) {
 async function say(channel, msg) {
   if (!client) return;
 
-  let text = clean(msg).slice(0, 430);
+  const text = clean(msg).slice(0, 430);
   if (!text) return;
 
   const wait = Math.max(0, SEND_GAP_MS - (Date.now() - lastSendAt));
@@ -202,13 +204,18 @@ async function reconnect(reason) {
   } catch {}
 
   await sleep(3000);
+
+  lastIrcAt = Date.now();
+  lastChatMsgAt = Date.now();
   reconnecting = false;
+
   startBot();
 }
 
 function bindEvents(c) {
   c.on("connected", (addr, port) => {
     lastIrcAt = Date.now();
+    lastChatMsgAt = Date.now();
     console.log("TWITCH_CONNECTED", addr, port);
     console.log("JOINED", CHANNELS.join(","));
   });
@@ -218,15 +225,16 @@ function bindEvents(c) {
     if (self) console.log("SELF_JOIN", channel, username);
   });
 
-  c.on("raw_message", () => {
-    lastIrcAt = Date.now();
-  });
-
   c.on("message", async (channel, tags, message, self) => {
     lastIrcAt = Date.now();
+    lastChatMsgAt = Date.now();
+
     if (self) return;
 
     const text = clean(message);
+
+    console.log("CHAT_IN", roomOf(channel), clean(tags?.username), text);
+
     if (!text.startsWith("!")) return;
 
     try {
@@ -280,6 +288,7 @@ function startBot() {
     .then(() => {
       connecting = false;
       lastIrcAt = Date.now();
+      lastChatMsgAt = Date.now();
     })
     .catch(err => {
       connecting = false;
@@ -297,6 +306,7 @@ function startHttp() {
         bot: BOT_USERNAME,
         channels: CHANNELS,
         ircIdleSec: Math.floor((Date.now() - lastIrcAt) / 1000),
+        chatIdleSec: Math.floor((Date.now() - lastChatMsgAt) / 1000),
         uptime: Math.floor(process.uptime()),
         time: new Date().toISOString(),
       }));
@@ -311,11 +321,17 @@ function startHttp() {
 }
 
 setInterval(() => {
-  const idle = Date.now() - lastIrcAt;
-  console.log("WATCHDOG", `ircIdle=${Math.floor(idle / 1000)}s`);
+  const ircIdle = Date.now() - lastIrcAt;
+  const chatIdle = Date.now() - lastChatMsgAt;
 
-  if (idle > IRC_STALE_MS) {
-    reconnect(`irc_stale_${Math.floor(idle / 1000)}s`);
+  console.log(
+    "WATCHDOG",
+    `ircIdle=${Math.floor(ircIdle / 1000)}s`,
+    `chatIdle=${Math.floor(chatIdle / 1000)}s`
+  );
+
+  if (chatIdle > CHAT_STALE_MS) {
+    reconnect(`chat_msg_stale_${Math.floor(chatIdle / 1000)}s`);
   }
 }, WATCHDOG_MS);
 
