@@ -330,9 +330,12 @@ setInterval(() => {
     `chatIdle=${Math.floor(chatIdle / 1000)}s`
   );
 
-  if (chatIdle > CHAT_STALE_MS) {
-    reconnect(`chat_msg_stale_${Math.floor(chatIdle / 1000)}s`);
-  }
+if (
+  chatIdle > 120 * 1000 &&
+  ircIdle > 120 * 1000
+) {
+  reconnect(`both_idle_${Math.floor(chatIdle / 1000)}s`);
+}
 }, WATCHDOG_MS);
 
 process.on("uncaughtException", err => {
