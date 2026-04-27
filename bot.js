@@ -1,179 +1,272 @@
-import tmi from 'tmi.js';
-import fetch from 'node-fetch';
-import http from 'http';
+import tmi from "tmi.js";
+import fetch from "node-fetch";
+import http from "http";
 
-/* ================= 基本設定 ================= */
-const BOT_USERNAME = (process.env.BOT_USERNAME || '').trim();
-const OAUTH_TOKEN = (process.env.OAUTH_TOKEN || '').trim();
-const API = (process.env.API || '').trim();
-
-const CHANNELS = (process.env.CHANNELS || '')
-  .split(',')
-  .map(s => s.trim().replace(/^#/, '').toLowerCase())
-  .filter(Boolean);
-
+const BOT_USERNAME = (process.env.BOT_USERNAME || "").trim();
+const OAUTH_TOKEN = (process.env.OAUTH_TOKEN || "").trim();
+const API = (process.env.API || "").trim();
 const PORT = Number(process.env.PORT || 3000);
 
-const API_TIMEOUT = 8000;
-const MAX_MSG = 300;
-const RETRY = 2;
+const CHANNELS = (process.env.CHANNELS || process.env.CHANNEL || "")
+  .split(",")
+  .map(x => x.trim().replace(/^#/, "").toLowerCase())
+  .filter(Boolean);
 
-/* ================= 啟動檢查 ================= */
+const ADD_SONG_USERS = (process.env.ADD_SONG_USERS || "")
+  .split(",")
+  .map(x => x.trim().toLowerCase())
+  .filter(Boolean);
+
 if (!BOT_USERNAME || !OAUTH_TOKEN || !API || !CHANNELS.length) {
-  console.error('❌ 環境變數缺少');
+  console.error("BOOT_FAIL missing env");
   process.exit(1);
 }
 
-/* ================= Twitch ================= */
-const client = new tmi.Client({
-  connection: { reconnect: true, secure: true },
-  identity: { username: BOT_USERNAME, password: OAUTH_TOKEN },
-  channels: CHANNELS.map(c => `#${c}`),
-});
+const API_TIMEOUT_MS = 9000;
+const SEND_GAP_MS = 900;
+let client;
+let lastSendAt = 0;
 
-/* ================= 工具 ================= */
 function clean(v) {
-  return String(v || '').replace(/\s+/g, ' ').trim();
+  return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function short(msg) {
-  return msg.length > MAX_MSG ? msg.slice(0, MAX_MSG) + '…' : msg;
+function roomOf(channel) {
+  return clean(channel).replace(/^#/, "").toLowerCase();
 }
 
-function isHtml(text) {
-  return text.startsWith('<!doctype') || text.startsWith('<html');
+function isHtml(t) {
+  const s = clean(t).toLowerCase();
+  return s.startsWith("<!doctype") || s.startsWith("<html");
 }
 
-async function fetchApi(url) {
+function buildUrl(action, params = {}) {
+  const url = new URL(API);
+  url.searchParams.set("action", action);
+  for (const [k, v] of Object.entries(params)) {
+    const s = clean(v);
+    if (s) url.searchParams.set(k, s);
+  }
+  return url.toString();
+}
+
+async function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+async function apiGet(url) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
-    const res = await fetch(url, { signal: controller.signal });
-    const text = await res.text();
-    return { ok: res.ok, text: clean(text) };
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "Cache-Control": "no-cache" },
+      signal: controller.signal,
+    });
+
+    const text = clean(await res.text());
+
+    console.log("API_STATUS", res.status);
+    console.log("API_TEXT", text.slice(0, 300));
+
+    if (!res.ok) return "系統忙碌中，請再試";
+    if (!text) return "系統沒有回應";
+    if (isHtml(text)) return "系統忙碌中，請再試";
+    if (text.startsWith("ERR:")) return "系統忙碌中，請再試";
+
+    return text.slice(0, 450);
+  } catch (err) {
+    console.error("API_ERROR", err?.name || err);
+    return "系統忙碌中，請再試";
   } finally {
     clearTimeout(timer);
   }
 }
 
-/* ================= API 呼叫（含 retry） ================= */
-async function callApi(url, username) {
-  for (let i = 0; i <= RETRY; i++) {
-    try {
-      const res = await fetchApi(url);
-
-      if (!res.ok) continue;
-
-      if (!res.text) return `@${username} 系統沒有回應`;
-
-      if (isHtml(res.text)) {
-        console.error('💥 GAS 回 HTML');
-        return `@${username} 系統忙碌中，請再試`;
-      }
-
-      if (res.text.length > 300) {
-        return `@${username} 系統回應過長，請重試`;
-      }
-
-      return res.text;
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        return `@${username} 系統忙碌中`;
-      }
-    }
-  }
-
-  return `@${username} 系統錯誤`;
-}
-
-/* ================= 防重複 ================= */
-const lastMsg = new Map();
-
-function canSend(channel, msg) {
-  const key = channel + msg;
-  const now = Date.now();
-  if (lastMsg.has(key) && now - lastMsg.get(key) < 30000) {
-    return false;
-  }
-  lastMsg.set(key, now);
-  return true;
-}
-
-/* ================= 發話 ================= */
 async function say(channel, msg) {
-  msg = short(msg);
+  const text = clean(msg).slice(0, 450);
+  if (!text || !client) return;
 
-  if (!canSend(channel, msg)) {
-    msg += ' .';
-  }
+  const wait = Math.max(0, SEND_GAP_MS - (Date.now() - lastSendAt));
+  if (wait) await sleep(wait);
 
   try {
-    await client.say(channel, msg);
-    console.log('[BOT]', msg);
-  } catch (e) {
-    console.error('❌ 發話失敗', e);
+    await client.say(channel, text);
+    lastSendAt = Date.now();
+    console.log("BOT_SAY", channel, text);
+  } catch (err) {
+    console.error("SAY_FAIL", err?.message || err);
   }
 }
 
-/* ================= Queue ================= */
-const queue = [];
-let running = false;
-
-function addTask(fn) {
-  queue.push(fn);
-  runQueue();
+function canAddSong(tags) {
+  const user = clean(tags?.username).toLowerCase();
+  const badges = tags?.badges || {};
+  return (
+    tags?.mod === true ||
+    badges?.broadcaster === "1" ||
+    badges?.moderator === "1" ||
+    ADD_SONG_USERS.includes(user)
+  );
 }
 
-async function runQueue() {
-  if (running) return;
-  running = true;
-
-  while (queue.length) {
-    const job = queue.shift();
-    try {
-      await job();
-    } catch (e) {
-      console.error('❌ 任務錯誤', e);
-    }
-  }
-
-  running = false;
-}
-
-/* ================= 訊息 ================= */
-client.on('message', async (channel, tags, message, self) => {
-  if (self) return;
-
-  const user = tags.username;
+async function handleCommand(channel, tags, message) {
+  const user = clean(tags?.username);
   const text = clean(message);
+  const room = roomOf(channel);
 
-  console.log('[MSG]', user, text);
+  console.log("MSG", room, user, text);
 
-  if (!text.startsWith('!')) return;
+  if (text === "!bot健康" || text === "!bothealth") {
+    const reply = await apiGet(buildUrl("health"));
+    await say(channel, `@${user} bot在線 GAS=${reply}`);
+    return;
+  }
 
-  if (text.startsWith('!點歌 ')) {
-    const q = clean(text.slice(4));
+  if (text === "!點歌") {
+    await say(channel, `@${user} 用法：!點歌 歌名`);
+    return;
+  }
 
-    addTask(async () => {
-      const url = `${API}?action=chat_suggest&user=${encodeURIComponent(user)}&q=${encodeURIComponent(q)}&channel=${channel.replace('#', '')}`;
+  // 支援：!點歌# 1 / !點歌#1 / !點歌 #1 / !點歌 1
+  let pick = text.match(/^!點歌#\s*([1-9])$/);
+  if (!pick) pick = text.match(/^!點歌\s+#?([1-9])$/);
 
-      const reply = await callApi(url, user);
-      await say(channel, reply);
+  if (pick) {
+    const url = buildUrl("chat_pick", {
+      user,
+      room,
+      n: pick[1],
     });
+    const reply = await apiGet(url);
+    await say(channel, reply);
+    return;
   }
 
-  if (text === '!點歌') {
-    await say(channel, `@${user} 請輸入歌名`);
+  if (text.startsWith("!點歌 ")) {
+    const q = clean(text.slice("!點歌 ".length));
+    if (!q) return;
+
+    const url = buildUrl("chat_suggest", {
+      user,
+      room,
+      q,
+    });
+
+    const reply = await apiGet(url);
+    await say(channel, reply);
+    return;
   }
+
+  if (text === "!新增點歌") {
+    await say(channel, `@${user} 用法：!新增點歌 歌名`);
+    return;
+  }
+
+  if (text.startsWith("!新增點歌 ")) {
+    if (!canAddSong(tags)) {
+      await say(channel, `@${user} 你沒有權限使用 !新增點歌`);
+      return;
+    }
+
+    const q = clean(text.slice("!新增點歌 ".length));
+    if (!q) return;
+
+    const url = buildUrl("chat_add", {
+      user,
+      room,
+      q,
+    });
+
+    const reply = await apiGet(url);
+    await say(channel, reply);
+  }
+}
+
+function startHttp() {
+  http.createServer((req, res) => {
+    if (req.url === "/" || req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok: true,
+        bot: BOT_USERNAME,
+        channels: CHANNELS,
+        uptime: Math.floor(process.uptime()),
+        time: new Date().toISOString(),
+      }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end("not found");
+  }).listen(PORT, () => {
+    console.log("HTTP_READY", PORT);
+  });
+}
+
+function startBot() {
+  client = new tmi.Client({
+    options: { debug: true, messagesLogLevel: "info" },
+    connection: {
+      reconnect: true,
+      secure: true,
+      reconnectInterval: 1000,
+      maxReconnectInterval: 30000,
+    },
+    identity: {
+      username: BOT_USERNAME,
+      password: OAUTH_TOKEN,
+    },
+    channels: CHANNELS.map(c => `#${c}`),
+  });
+
+  client.on("connected", (addr, port) => {
+    console.log("TWITCH_CONNECTED", addr, port);
+    console.log("JOINED", CHANNELS.join(","));
+  });
+
+  client.on("disconnected", reason => {
+    console.error("TWITCH_DISCONNECTED", reason);
+  });
+
+  client.on("notice", (channel, msgid, message) => {
+    console.log("NOTICE", roomOf(channel), msgid, message);
+  });
+
+  client.on("message", async (channel, tags, message, self) => {
+    if (self) return;
+    const text = clean(message);
+    if (!text.startsWith("!")) return;
+
+    try {
+      await handleCommand(channel, tags, text);
+    } catch (err) {
+      console.error("COMMAND_FAIL", err?.stack || err);
+      await say(channel, `@${clean(tags?.username)} 系統忙碌中，請再試`);
+    }
+  });
+
+  client.connect().catch(err => {
+    console.error("CONNECT_FAIL", err?.stack || err);
+    process.exit(1);
+  });
+}
+
+process.on("uncaughtException", err => {
+  console.error("UNCAUGHT", err?.stack || err);
+  process.exit(1);
 });
 
-/* ================= 健康 ================= */
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('OK');
-}).listen(PORT);
+process.on("unhandledRejection", err => {
+  console.error("UNHANDLED", err?.stack || err);
+  process.exit(1);
+});
 
-/* ================= 啟動 ================= */
-client.connect();
-console.log('🤖 BOT 啟動完成');
+console.log("BOT_BOOT");
+console.log("BOT_USERNAME", BOT_USERNAME);
+console.log("CHANNELS", CHANNELS.join(","));
+console.log("API_READY", !!API);
+
+startHttp();
+startBot();
