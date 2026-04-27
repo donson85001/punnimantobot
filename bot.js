@@ -2,356 +2,172 @@ import tmi from "tmi.js";
 import fetch from "node-fetch";
 import http from "http";
 
-const BOT_USERNAME = (process.env.BOT_USERNAME || "").trim();
-const OAUTH_TOKEN = (process.env.OAUTH_TOKEN || "").trim();
-const API = (process.env.API || "").trim();
-const PORT = Number(process.env.PORT || 3000);
+const BOT_USERNAME = process.env.BOT_USERNAME;
+const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
+const API = process.env.API;
+const CHANNEL = process.env.CHANNELS;
 
-const CHANNELS = (process.env.CHANNELS || process.env.CHANNEL || "")
-  .split(",")
-  .map(x => x.trim().replace(/^#/, "").toLowerCase())
-  .filter(Boolean);
+const PORT = process.env.PORT || 3000;
 
-const ADD_SONG_USERS = (process.env.ADD_SONG_USERS || "")
-  .split(",")
-  .map(x => x.trim().toLowerCase())
-  .filter(Boolean);
-
-if (!BOT_USERNAME || !OAUTH_TOKEN || !API || !CHANNELS.length) {
-  console.error("BOOT_FAIL missing env");
-  process.exit(1);
-}
-
-const API_TIMEOUT_MS = 9000;
-const SEND_GAP_MS = 900;
-const CHAT_STALE_MS = 90 * 1000;
-const WATCHDOG_MS = 30 * 1000;
-
-let client = null;
-let connecting = false;
+// ===== 狀態 =====
+let client;
+let lastMsgAt = Date.now();
+let lastPingAt = Date.now();
 let reconnecting = false;
 
-let lastIrcAt = Date.now();
-let lastChatMsgAt = Date.now();
-let lastSendAt = 0;
+// ===== 工具 =====
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function clean(v) {
-  return String(v ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+function log(...a) {
+  console.log(new Date().toISOString(), ...a);
 }
 
-function roomOf(channel) {
-  return clean(channel).replace(/^#/, "").toLowerCase();
-}
-
-function isHtml(t) {
-  const s = clean(t).toLowerCase();
-  return s.startsWith("<!doctype") || s.startsWith("<html");
-}
-
-function buildUrl(action, params = {}) {
-  const url = new URL(API);
-  url.searchParams.set("action", action);
-  for (const [k, v] of Object.entries(params)) {
-    const s = clean(v);
-    if (s) url.searchParams.set(k, s);
-  }
-  return url.toString();
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-async function apiGet(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-
+// ===== API =====
+async function callAPI(url) {
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { "Cache-Control": "no-cache" },
-      signal: controller.signal,
-    });
+    const res = await fetch(url);
+    const text = (await res.text()).trim();
 
-    const text = clean(await res.text());
+    if (!res.ok) return "系統忙碌中";
+    if (!text) return "系統忙碌中";
 
-    console.log("API_STATUS", res.status);
-    console.log("API_TEXT", text.slice(0, 300));
-
-    if (!res.ok) return "系統忙碌中，請再試";
-    if (!text) return "系統沒有回應";
-    if (isHtml(text)) return "系統忙碌中，請再試";
-    if (text.startsWith("ERR:")) return "系統忙碌中，請再試";
-
-    return text.slice(0, 430);
-  } catch (err) {
-    console.error("API_ERROR", err?.name || err);
-    return "系統忙碌中，請再試";
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function say(channel, msg) {
-  if (!client) return;
-
-  const text = clean(msg).slice(0, 430);
-  if (!text) return;
-
-  const wait = Math.max(0, SEND_GAP_MS - (Date.now() - lastSendAt));
-  if (wait) await sleep(wait);
-
-  try {
-    await client.say(channel, text);
-    lastSendAt = Date.now();
-    console.log("BOT_SAY", channel, text);
-  } catch (err) {
-    console.error("SAY_FAIL", err?.message || err);
-  }
-}
-
-function canAddSong(tags) {
-  const user = clean(tags?.username).toLowerCase();
-  const badges = tags?.badges || {};
-  return (
-    tags?.mod === true ||
-    badges?.broadcaster === "1" ||
-    badges?.moderator === "1" ||
-    ADD_SONG_USERS.includes(user)
-  );
-}
-
-async function handleCommand(channel, tags, message) {
-  const user = clean(tags?.username);
-  const text = clean(message);
-  const room = roomOf(channel);
-
-  console.log("MSG", room, user, text);
-
-  if (text === "!bot健康" || text === "!bothealth") {
-    const reply = await apiGet(buildUrl("health"));
-    await say(channel, `@${user} bot在線 GAS=${reply}`);
-    return;
-  }
-
-  if (text === "!點歌") {
-    await say(channel, `@${user} 用法：!點歌 歌名`);
-    return;
-  }
-
-  let pick = text.match(/^!點歌#\s*([1-9])$/);
-  if (!pick) pick = text.match(/^!點歌\s+#?([1-9])$/);
-
-  if (pick) {
-    const reply = await apiGet(buildUrl("chat_pick", {
-      user,
-      room,
-      n: pick[1],
-    }));
-    await say(channel, reply);
-    return;
-  }
-
-  if (text.startsWith("!點歌 ")) {
-    const q = clean(text.slice("!點歌 ".length));
-    if (!q) return;
-
-    const reply = await apiGet(buildUrl("chat_suggest", {
-      user,
-      room,
-      q,
-    }));
-    await say(channel, reply);
-    return;
-  }
-
-  if (text === "!新增點歌") {
-    await say(channel, `@${user} 用法：!新增點歌 歌名`);
-    return;
-  }
-
-  if (text.startsWith("!新增點歌 ")) {
-    if (!canAddSong(tags)) {
-      await say(channel, `@${user} 你沒有權限使用 !新增點歌`);
-      return;
+    if (text.startsWith("<!doctype") || text.startsWith("<html")) {
+      return "系統忙碌中";
     }
 
-    const q = clean(text.slice("!新增點歌 ".length));
-    if (!q) return;
-
-    const reply = await apiGet(buildUrl("chat_add", {
-      user,
-      room,
-      q,
-    }));
-    await say(channel, reply);
+    return text.slice(0, 400);
+  } catch {
+    return "系統忙碌中";
   }
 }
 
-async function reconnect(reason) {
-  if (reconnecting || connecting) return;
+// ===== 發話（防 Twitch 擋）=====
+let lastSend = "";
+async function say(channel, msg) {
+  if (!msg) return;
+
+  // 防重複
+  if (msg === lastSend) msg += " .";
+
+  lastSend = msg;
+
+  try {
+    await client.say(channel, msg);
+    log("BOT:", msg);
+  } catch (e) {
+    log("SEND_FAIL", e.message);
+  }
+}
+
+// ===== 指令 =====
+async function handle(channel, tags, message) {
+  const user = tags.username;
+  const room = channel.replace("#", "");
+
+  log("CHAT", user, message);
+
+  if (message === "!bot健康") {
+    const r = await callAPI(`${API}?action=health`);
+    return say(channel, `@${user} bot在線 ${r}`);
+  }
+
+  if (message.startsWith("!點歌 ")) {
+    const q = message.slice(4).trim();
+    const r = await callAPI(`${API}?action=chat_suggest&user=${user}&room=${room}&q=${encodeURIComponent(q)}`);
+    return say(channel, r);
+  }
+
+  if (message.match(/^!點歌#?\s*\d/)) {
+    const n = message.replace(/[^0-9]/g, "");
+    const r = await callAPI(`${API}?action=chat_pick&user=${user}&room=${room}&n=${n}`);
+    return say(channel, r);
+  }
+}
+
+// ===== 連線 =====
+function startBot() {
+  log("START BOT");
+
+  client = new tmi.Client({
+    options: { debug: true },
+    connection: {
+      reconnect: true,
+      secure: true,
+      maxReconnectAttempts: Infinity
+    },
+    identity: {
+      username: BOT_USERNAME,
+      password: OAUTH_TOKEN
+    },
+    channels: [CHANNEL]
+  });
+
+  client.on("connected", () => {
+    log("TWITCH_CONNECTED");
+  });
+
+  client.on("message", (channel, tags, msg, self) => {
+    if (self) return;
+
+    lastMsgAt = Date.now();
+    handle(channel, tags, msg);
+  });
+
+  client.on("disconnected", () => {
+    log("DISCONNECTED");
+    forceReconnect("disconnect");
+  });
+
+  client.connect();
+}
+
+// ===== 強制重連（核心）=====
+async function forceReconnect(reason) {
+  if (reconnecting) return;
   reconnecting = true;
 
-  console.error("FORCE_RECONNECT", reason);
+  log("RECONNECT:", reason);
 
   try {
-    if (client) {
-      client.removeAllListeners();
-      try {
-        await client.disconnect();
-      } catch {}
-    }
+    client.removeAllListeners();
+    await client.disconnect();
   } catch {}
 
   await sleep(3000);
 
-  lastIrcAt = Date.now();
-  lastChatMsgAt = Date.now();
   reconnecting = false;
-
   startBot();
 }
 
-function bindEvents(c) {
-  c.on("connected", (addr, port) => {
-    lastIrcAt = Date.now();
-    lastChatMsgAt = Date.now();
-    console.log("TWITCH_CONNECTED", addr, port);
-    console.log("JOINED", CHANNELS.join(","));
-  });
-
-  c.on("join", (channel, username, self) => {
-    lastIrcAt = Date.now();
-    if (self) console.log("SELF_JOIN", channel, username);
-  });
-
-  c.on("message", async (channel, tags, message, self) => {
-    lastIrcAt = Date.now();
-    lastChatMsgAt = Date.now();
-
-    if (self) return;
-
-    const text = clean(message);
-
-    console.log("CHAT_IN", roomOf(channel), clean(tags?.username), text);
-
-    if (!text.startsWith("!")) return;
-
-    try {
-      await handleCommand(channel, tags, text);
-    } catch (err) {
-      console.error("COMMAND_FAIL", err?.stack || err);
-      await say(channel, `@${clean(tags?.username)} 系統忙碌中，請再試`);
-    }
-  });
-
-  c.on("notice", (channel, msgid, message) => {
-    lastIrcAt = Date.now();
-    console.log("NOTICE", roomOf(channel), msgid, message);
-  });
-
-  c.on("disconnected", reason => {
-    console.error("TWITCH_DISCONNECTED", reason);
-    reconnect("disconnected");
-  });
-
-  c.on("error", err => {
-    console.error("TWITCH_ERROR", err?.message || err);
-  });
-}
-
-function startBot() {
-  if (connecting) return;
-  connecting = true;
-
-  client = new tmi.Client({
-    options: {
-      debug: true,
-      messagesLogLevel: "info",
-    },
-    connection: {
-      reconnect: true,
-      secure: true,
-      reconnectInterval: 1000,
-      maxReconnectInterval: 30000,
-    },
-    identity: {
-      username: BOT_USERNAME,
-      password: OAUTH_TOKEN,
-    },
-    channels: CHANNELS.map(c => `#${c}`),
-  });
-
-  bindEvents(client);
-
-  client.connect()
-    .then(() => {
-      connecting = false;
-      lastIrcAt = Date.now();
-      lastChatMsgAt = Date.now();
-    })
-    .catch(err => {
-      connecting = false;
-      console.error("CONNECT_FAIL", err?.stack || err);
-      setTimeout(() => reconnect("connect_fail"), 5000);
-    });
-}
-
-function startHttp() {
-  http.createServer((req, res) => {
-    if (req.url === "/" || req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({
-        ok: true,
-        bot: BOT_USERNAME,
-        channels: CHANNELS,
-        ircIdleSec: Math.floor((Date.now() - lastIrcAt) / 1000),
-        chatIdleSec: Math.floor((Date.now() - lastChatMsgAt) / 1000),
-        uptime: Math.floor(process.uptime()),
-        time: new Date().toISOString(),
-      }));
-      return;
-    }
-
-    res.writeHead(404);
-    res.end("not found");
-  }).listen(PORT, () => {
-    console.log("HTTP_READY", PORT);
-  });
-}
-
+// ===== WATCHDOG（最關鍵）=====
 setInterval(() => {
-  const ircIdle = Date.now() - lastIrcAt;
-  const chatIdle = Date.now() - lastChatMsgAt;
+  const now = Date.now();
 
-  console.log(
-    "WATCHDOG",
-    `ircIdle=${Math.floor(ircIdle / 1000)}s`,
-    `chatIdle=${Math.floor(chatIdle / 1000)}s`
-  );
+  const noChat = now - lastMsgAt;
+  const noPing = now - lastPingAt;
 
-if (
-  chatIdle > 120 * 1000 &&
-  ircIdle > 120 * 1000
-) {
-  reconnect(`both_idle_${Math.floor(chatIdle / 1000)}s`);
-}
-}, WATCHDOG_MS);
+  log("WATCHDOG", `chat=${Math.floor(noChat/1000)}s`);
 
-process.on("uncaughtException", err => {
-  console.error("UNCAUGHT", err?.stack || err);
-  process.exit(1);
-});
+  // 👉 真正判斷（重點）
+  if (noChat > 120000) {
+    forceReconnect("chat_dead");
+  }
 
-process.on("unhandledRejection", err => {
-  console.error("UNHANDLED", err?.stack || err);
-  process.exit(1);
-});
+}, 30000);
 
-console.log("BOT_BOOT");
-console.log("BOT_USERNAME", BOT_USERNAME);
-console.log("CHANNELS", CHANNELS.join(","));
-console.log("API_READY", !!API);
+// ===== 保活（避免 Render 降資源）=====
+setInterval(() => {
+  try {
+    client.ping();
+    lastPingAt = Date.now();
+  } catch {}
+}, 60000);
 
-startHttp();
+// ===== HTTP（防睡）=====
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("ok");
+}).listen(PORT);
+
+// ===== 啟動 =====
 startBot();
