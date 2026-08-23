@@ -22,6 +22,9 @@ let reconnectTimer = null;
 let lastMessageIds = new Set();
 let lastSend = '';
 let lastSendAt = 0;
+let songsCache = [];
+let songsCacheAt = 0;
+const pendingChoices = new Map();
 
 function clean(v){return String(v ?? '').replace(/[\r\n\t]+/g,' ').replace(/\s+/g,' ').trim()}
 function log(...args){
@@ -84,15 +87,57 @@ async function getBroadcaster(login){
   const d=await helix('/users?login='+encodeURIComponent(login));
   const u=d.data?.[0];if(!u) throw new Error('找不到頻道：'+login);return u;
 }
-async function callGAS(url){
-  const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),9000);
+
+async function gas(action,payload=null){
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),15000);
   try{
-    const res=await fetch(url,{method:'GET',cache:'no-store',signal:ctrl.signal});
-    const text=clean(await res.text());
-    if(!res.ok||!text||/^<!doctype|^<html/i.test(text)||text.startsWith('ERR:')) return '系統忙碌中，請再試';
-    return text.slice(0,430);
-  }catch(e){log('GAS_ERROR',e.message);return '系統忙碌中，請再試'}finally{clearTimeout(timer)}
+    const u=new URL(GAS_API);
+    u.searchParams.set('action',action);
+    if(payload && typeof payload==='object'){
+      u.searchParams.set('payload',JSON.stringify(payload));
+      Object.entries(payload).forEach(([k,v])=>{
+        if(v!==undefined && v!==null) u.searchParams.set(k,String(v));
+      });
+    }
+    u.searchParams.set('_',String(Date.now()));
+    const res=await fetch(u.toString(),{method:'GET',cache:'no-store',signal:ctrl.signal});
+    const txt=(await res.text()).trim();
+    if(!res.ok) throw new Error(`GAS HTTP ${res.status}`);
+    if(!txt) throw new Error('GAS 空白回應');
+    let data;
+    try{data=JSON.parse(txt)}catch{throw new Error('GAS 回傳不是 JSON：'+txt.slice(0,120))}
+    if(data?.ok===false) throw new Error(data.error||data.message||'GAS 操作失敗');
+    return data;
+  }finally{clearTimeout(timer)}
 }
+
+async function getSongs(){
+  if(songsCache.length && Date.now()-songsCacheAt<60000) return songsCache;
+  const d=await gas('songs');
+  songsCache=Array.isArray(d.data)?d.data:[];
+  songsCacheAt=Date.now();
+  return songsCache;
+}
+function norm(s){return clean(s).toLowerCase()}
+function findSongs(list,q){
+  const needle=norm(q);
+  if(!needle) return [];
+  const exact=list.filter(s=>norm(s.title)===needle);
+  if(exact.length) return exact.slice(0,9);
+  return list.filter(s=>
+    norm(s.title).includes(needle) ||
+    norm(s.artist).includes(needle) ||
+    norm(s.subtag).includes(needle)
+  ).slice(0,9);
+}
+function choiceKey(room,user){return `${room}:${user}`}
+async function addSong(song,user){
+  const res=await gas('queue_add',{songId:song.id,by:user,user});
+  if(!res || res.ok===false) throw new Error(res?.error||'加入 Queue 失敗');
+  return `@${user} 已加入：${song.title}${song.artist?` - ${song.artist}`:''}`;
+}
+
 async function say(msg){
   let text=clean(msg).slice(0,430);if(!text||!me||!broadcaster)return;
   if(text===lastSend) text+=' .';
@@ -100,25 +145,60 @@ async function say(msg){
   await helix('/chat/messages',{method:'POST',body:JSON.stringify({broadcaster_id:broadcaster.id,sender_id:me.id,message:text})});
   lastSend=text;lastSendAt=Date.now();log('BOT_SAY',text);
 }
+
 async function handleChat(event){
   if(!event)return;
   const user=clean(event.chatter_user_login||event.chatter_user_name||'chat');
   const room=broadcaster.login.toLowerCase();
   const text=clean(event.message?.text||'');
   log('CHAT_IN',user,text);
+
   if(text==='!bot健康'||text==='!bothealth'){
-    const r=await callGAS(`${GAS_API}?action=health`);await say(`@${user} bot在線 GAS=${r}`);return;
+    await say(`@${user} bot在線，Twitch監聽正常，GAS可用`);
+    return;
   }
-  let pick=text.match(/^!點歌#\s*([1-9])$/);if(!pick)pick=text.match(/^!點歌\s+#?([1-9])$/);
+
+  let pick=text.match(/^!點歌#\s*([1-9])$/);
+  if(!pick) pick=text.match(/^!點歌\s+#?([1-9])$/);
   if(pick){
-    const r=await callGAS(`${GAS_API}?action=chat_pick&user=${encodeURIComponent(user)}&room=${encodeURIComponent(room)}&n=${encodeURIComponent(pick[1])}`);await say(r);return;
+    const saved=pendingChoices.get(choiceKey(room,user));
+    if(!saved || Date.now()-saved.at>10*60*1000){
+      pendingChoices.delete(choiceKey(room,user));
+      await say(`@${user} 沒有待選歌曲，請先輸入：!點歌 歌名`);
+      return;
+    }
+    const song=saved.items[Number(pick[1])-1];
+    if(!song){await say(`@${user} 沒有第 ${pick[1]} 首，請重新搜尋`);return;}
+    try{
+      const msg=await addSong(song,user);
+      pendingChoices.delete(choiceKey(room,user));
+      await say(msg);
+    }catch(e){await say(`@${user} 加入失敗：${clean(e.message)}`)}
+    return;
   }
-  if(text==='!點歌'){await say(`@${user} 用法：!點歌 歌名`);return;}
+
+  if(text==='!點歌'){
+    await say(`@${user} 用法：!點歌 歌名`);
+    return;
+  }
+
   if(text.startsWith('!點歌 ')){
     const q=clean(text.slice('!點歌 '.length));if(!q)return;
-    const r=await callGAS(`${GAS_API}?action=chat_suggest&user=${encodeURIComponent(user)}&room=${encodeURIComponent(room)}&q=${encodeURIComponent(q)}`);await say(r);
+    try{
+      const all=await getSongs();
+      const found=findSongs(all,q);
+      if(!found.length){await say(`@${user} 找不到「${q}」`);return;}
+      if(found.length===1){await say(await addSong(found[0],user));return;}
+      pendingChoices.set(choiceKey(room,user),{items:found,at:Date.now()});
+      const menu=found.map((s,i)=>`#${i+1} ${s.title}${s.artist?`-${s.artist}`:''}`).join('｜');
+      await say(`@${user} 找到 ${found.length} 首：${menu}；輸入 !點歌 #編號`);
+    }catch(e){
+      log('COMMAND_ERROR',e.message);
+      await say(`@${user} 系統忙碌中，請再試`);
+    }
   }
 }
+
 async function subscribe(sessionId){
   const body={type:'channel.chat.message',version:'1',condition:{broadcaster_user_id:broadcaster.id,user_id:me.id},transport:{method:'websocket',session_id:sessionId}};
   const d=await helix('/eventsub/subscriptions',{method:'POST',body:JSON.stringify(body)});
