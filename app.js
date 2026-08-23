@@ -101,7 +101,7 @@ async function say(msg){
   lastSend=text;lastSendAt=Date.now();log('BOT_SAY',text);
 }
 async function handleChat(event){
-  if(!event||event.chatter_user_id===me?.id)return;
+  if(!event)return;
   const user=clean(event.chatter_user_login||event.chatter_user_name||'chat');
   const room=broadcaster.login.toLowerCase();
   const text=clean(event.message?.text||'');
