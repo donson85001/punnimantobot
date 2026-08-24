@@ -2,7 +2,7 @@ const CLIENT_ID = 'vm3808dv10eqwc7xacypadpuzc1s2d';
 const GAS_API = 'https://script.google.com/macros/s/AKfycbzROo5-SoKBzfJcVm1K71iMHcViyXXzKdiuNDEkgl60zw-AcJnxvVMODQfSYkausZ5K/exec';
 const REDIRECT_URI = 'https://donson85001.github.io/punnimantobot/';
 const SCOPES = ['user:read:chat','user:write:chat'];
-const BUILD = 'browser-v2-20260824-0720';
+const BUILD = 'browser-v2-20260825-0220';
 
 const $ = id => document.getElementById(id);
 const loginStatus = $('loginStatus');
@@ -23,9 +23,6 @@ let reconnectTimer = null;
 let lastMessageIds = new Set();
 let lastSend = '';
 let lastSendAt = 0;
-let songsCache = [];
-let songsCacheAt = 0;
-const pendingChoices = new Map();
 
 function clean(v){return String(v ?? '').replace(/[\r\n\t]+/g,' ').replace(/\s+/g,' ').trim()}
 function log(...args){
@@ -36,6 +33,10 @@ function log(...args){
 }
 function setBotStatus(text, ok=false){botStatus.textContent=text;botStatus.className='status '+(ok?'ok':'')}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+function isHtml(text){
+  const s=clean(text).toLowerCase();
+  return s.startsWith('<!doctype') || s.startsWith('<html');
+}
 
 function parseOAuth(){
   if(!location.hash) return;
@@ -89,50 +90,35 @@ async function getBroadcaster(login){
   const u=d.data?.[0];if(!u) throw new Error('找不到頻道：'+login);return u;
 }
 
-async function gas(action,payload=null){
+async function callGAS(action, params={}){
   const ctrl=new AbortController();
   const timer=setTimeout(()=>ctrl.abort(),15000);
   try{
     const u=new URL(GAS_API);
     u.searchParams.set('action',action);
-    if(payload && typeof payload==='object'){
-      u.searchParams.set('payload',JSON.stringify(payload));
-      Object.entries(payload).forEach(([k,v])=>{
-        if(v!==undefined && v!==null) u.searchParams.set(k,String(v));
-      });
-    }
+    Object.entries(params).forEach(([k,v])=>{
+      if(v!==undefined && v!==null) u.searchParams.set(k,String(v));
+    });
     u.searchParams.set('_',String(Date.now()));
-    const res=await fetch(u.toString(),{method:'GET',cache:'no-store',signal:ctrl.signal});
-    const txt=(await res.text()).trim();
+
+    const res=await fetch(u.toString(),{
+      method:'GET',
+      cache:'no-store',
+      redirect:'follow',
+      signal:ctrl.signal
+    });
+    const txt=clean(await res.text());
+    log('GAS_STATUS',res.status,action);
+    log('GAS_TEXT',txt.slice(0,250));
+
     if(!res.ok) throw new Error(`GAS HTTP ${res.status}`);
     if(!txt) throw new Error('GAS 空白回應');
-    let data;
-    try{data=JSON.parse(txt)}catch{throw new Error('GAS 回傳不是 JSON：'+txt.slice(0,120))}
-    if(data?.ok===false) throw new Error(data.error||data.message||'GAS 操作失敗');
-    return data;
-  }finally{clearTimeout(timer)}
-}
-
-async function getSongs(){
-  if(songsCache.length && Date.now()-songsCacheAt<60000) return songsCache;
-  const d=await gas('songs');
-  songsCache=Array.isArray(d.data)?d.data:[];
-  songsCacheAt=Date.now();
-  return songsCache;
-}
-function norm(s){return clean(s).toLowerCase()}
-function findSongs(list,q){
-  const needle=norm(q);
-  if(!needle) return [];
-  const exact=list.filter(s=>norm(s.title)===needle);
-  if(exact.length) return exact.slice(0,9);
-  return list.filter(s=>norm(s.title).includes(needle)||norm(s.artist).includes(needle)||norm(s.subtag).includes(needle)).slice(0,9);
-}
-function choiceKey(room,user){return `${room}:${user}`}
-async function addSong(song,user){
-  const res=await gas('queue_add',{songId:song.id,by:user,user});
-  if(!res || res.ok===false) throw new Error(res?.error||'加入 Queue 失敗');
-  return `@${user} 已加入：${song.title}${song.artist?` - ${song.artist}`:''}`;
+    if(isHtml(txt)) throw new Error('GAS 回傳 HTML');
+    if(txt.startsWith('ERR:')) throw new Error(txt);
+    return txt.slice(0,430);
+  }finally{
+    clearTimeout(timer);
+  }
 }
 
 async function say(msg){
@@ -152,10 +138,11 @@ async function handleChat(event){
 
   if(text==='!bot健康'||text==='!bothealth'){
     try{
-      await gas('songs');
-      await say(`@${user} bot在線，Twitch監聽正常，GAS可用`);
+      const r=await callGAS('health');
+      await say(`@${user} bot在線 GAS=${r}`);
     }catch(e){
-      await say(`@${user} bot在線，但 GAS 讀取失敗：${clean(e.message)}`);
+      log('GAS_ERROR',e.message);
+      await say(`@${user} bot在線，但 GAS 失敗：${clean(e.message)}`);
     }
     return;
   }
@@ -163,19 +150,13 @@ async function handleChat(event){
   let pick=text.match(/^!點歌#\s*([1-9])$/);
   if(!pick) pick=text.match(/^!點歌\s+#?([1-9])$/);
   if(pick){
-    const saved=pendingChoices.get(choiceKey(room,user));
-    if(!saved || Date.now()-saved.at>10*60*1000){
-      pendingChoices.delete(choiceKey(room,user));
-      await say(`@${user} 沒有待選歌曲，請先輸入：!點歌 歌名`);
-      return;
-    }
-    const song=saved.items[Number(pick[1])-1];
-    if(!song){await say(`@${user} 沒有第 ${pick[1]} 首，請重新搜尋`);return;}
     try{
-      const msg=await addSong(song,user);
-      pendingChoices.delete(choiceKey(room,user));
-      await say(msg);
-    }catch(e){await say(`@${user} 加入失敗：${clean(e.message)}`)}
+      const r=await callGAS('chat_pick',{user,room,n:pick[1]});
+      await say(r);
+    }catch(e){
+      log('COMMAND_ERROR',e.message);
+      await say(`@${user} 系統忙碌中，請再試`);
+    }
     return;
   }
 
@@ -185,15 +166,11 @@ async function handleChat(event){
   }
 
   if(text.startsWith('!點歌 ')){
-    const q=clean(text.slice('!點歌 '.length));if(!q)return;
+    const q=clean(text.slice('!點歌 '.length));
+    if(!q)return;
     try{
-      const all=await getSongs();
-      const found=findSongs(all,q);
-      if(!found.length){await say(`@${user} 找不到「${q}」`);return;}
-      if(found.length===1){await say(await addSong(found[0],user));return;}
-      pendingChoices.set(choiceKey(room,user),{items:found,at:Date.now()});
-      const menu=found.map((s,i)=>`#${i+1} ${s.title}${s.artist?`-${s.artist}`:''}`).join('｜');
-      await say(`@${user} 找到 ${found.length} 首：${menu}；輸入 !點歌 #編號`);
+      const r=await callGAS('chat_suggest',{user,room,q});
+      await say(r);
     }catch(e){
       log('COMMAND_ERROR',e.message);
       await say(`@${user} 系統忙碌中，請再試`);
