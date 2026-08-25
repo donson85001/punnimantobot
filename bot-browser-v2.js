@@ -2,7 +2,7 @@ const CLIENT_ID = 'vm3808dv10eqwc7xacypadpuzc1s2d';
 const GAS_API = 'https://script.google.com/macros/s/AKfycbzROo5-SoKBzfJcVm1K71iMHcViyXXzKdiuNDEkgl60zw-AcJnxvVMODQfSYkausZ5K/exec';
 const REDIRECT_URI = 'https://donson85001.github.io/punnimantobot/';
 const SCOPES = ['user:read:chat','user:write:chat'];
-const BUILD = 'browser-v2-20260825-0228';
+const BUILD = 'browser-v2-20260826-requester-name';
 
 const $ = id => document.getElementById(id);
 const loginStatus = $('loginStatus');
@@ -132,7 +132,7 @@ function findSongs(list,q){
   return list.filter(s=>norm(s.title).includes(needle)||norm(s.artist).includes(needle)||norm(s.subtag).includes(needle)).slice(0,9);
 }
 async function addSong(song,user){
-  const res=await gas('queue_add',{songId:song.id});
+  const res=await gas('queue_add',{songId:song.id,by:user,user});
   if(!res || res.ok===false) throw new Error(res?.error||'加入 Queue 失敗');
   return `@${user} 已加入：${song.title}${song.artist?` - ${song.artist}`:''}`;
 }
@@ -147,7 +147,7 @@ async function say(msg){
 
 async function handleChat(event){
   if(!event)return;
-  const user=clean(event.chatter_user_login||event.chatter_user_name||'chat');
+  const user=clean(event.chatter_user_name||event.chatter_user_login||'chat');
   const room=broadcaster.login.toLowerCase();
   const text=clean(event.message?.text||'');
   log('CHAT_IN',user,text);
