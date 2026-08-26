@@ -1,8 +1,8 @@
 const CLIENT_ID = 'vm3808dv10eqwc7xacypadpuzc1s2d';
-const GAS_API = 'https://script.google.com/macros/s/AKfycbxztQcbYEZ9FI4-YwfGYBoTawQtqRk-XryI8ryunF_fDVwPJaSlFPxkOMkl6pZgDTpJ/exec';
+const GAS_API = 'https://script.google.com/macros/s/AKfycbyJ25HjJ94OQwK1mJrmnj4d7g2_4TeLMcpJ6WBUMarngeZye5epRHhzrzHeBvJA9A/exec';
 const REDIRECT_URI = 'https://donson85001.github.io/punnimantobot/';
 const SCOPES = ['user:read:chat','user:write:chat'];
-const BUILD = 'browser-v2-20260826-proven-chat-add';
+const BUILD = 'browser-v2-20260826-new-gas-chat-add';
 const ADD_SONG_USERS = new Set(['puruniii','manto__1109']);
 
 const $ = id => document.getElementById(id);
