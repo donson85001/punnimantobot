@@ -2,7 +2,8 @@ const CLIENT_ID = 'vm3808dv10eqwc7xacypadpuzc1s2d';
 const GAS_API = 'https://script.google.com/macros/s/AKfycbzROo5-SoKBzfJcVm1K71iMHcViyXXzKdiuNDEkgl60zw-AcJnxvVMODQfSYkausZ5K/exec';
 const REDIRECT_URI = 'https://donson85001.github.io/punnimantobot/';
 const SCOPES = ['user:read:chat','user:write:chat'];
-const BUILD = 'browser-v2-20260826-requester-name';
+const BUILD = 'browser-v2-20260826-add-song-restore';
+const ADD_SONG_USERS = new Set(['puruniii','manto__1109']);
 
 const $ = id => document.getElementById(id);
 const loginStatus = $('loginStatus');
@@ -39,6 +40,7 @@ function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
 function isHtml(text){const s=clean(text).toLowerCase();return s.startsWith('<!doctype')||s.startsWith('<html')}
 function norm(s){return clean(s).toLowerCase()}
 function choiceKey(room,user){return `${room}:${user}`}
+function canAddSong(login){return ADD_SONG_USERS.has(norm(login))}
 
 function parseOAuth(){
   if(!location.hash) return;
@@ -116,6 +118,38 @@ async function gas(action,payload=null){
   }finally{clearTimeout(timer)}
 }
 
+async function gasText(action,payload=null){
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),30000);
+  try{
+    const u=new URL(GAS_API);
+    u.searchParams.set('action',action);
+    if(payload && typeof payload==='object'){
+      u.searchParams.set('payload',JSON.stringify(payload));
+      Object.entries(payload).forEach(([k,v])=>{if(v!==undefined&&v!==null)u.searchParams.set(k,String(v))});
+    }
+    u.searchParams.set('_',String(Date.now()));
+    const res=await fetch(u.toString(),{method:'GET',cache:'no-store',redirect:'follow',signal:ctrl.signal});
+    const raw=(await res.text()).trim();
+    log('GAS_STATUS',res.status,action);
+    log('GAS_TEXT',clean(raw).slice(0,250));
+    if(!res.ok) throw new Error(`GAS HTTP ${res.status}`);
+    if(!raw) throw new Error('GAS 空白回應');
+    if(isHtml(raw)) throw new Error('GAS 回傳 HTML');
+    if(raw.startsWith('ERR:')) throw new Error(raw);
+    try{
+      const data=JSON.parse(raw);
+      if(data && !Array.isArray(data) && data.ok===false) throw new Error(data.error||data.message||'GAS 操作失敗');
+      if(typeof data==='string') return clean(data);
+      if(data && typeof data==='object') return clean(data.message||data.text||data.result||data.title||raw);
+    }catch(e){
+      if(e instanceof SyntaxError) return clean(raw);
+      throw e;
+    }
+    return clean(raw);
+  }finally{clearTimeout(timer)}
+}
+
 async function getSongs(force=false){
   if(!force && songsCache.length && Date.now()-songsCacheAt<60000) return songsCache;
   const d=await gas('songs');
@@ -136,6 +170,12 @@ async function addSong(song,user){
   if(!res || res.ok===false) throw new Error(res?.error||'加入 Queue 失敗');
   return `@${user} 已加入：${song.title}${song.artist?` - ${song.artist}`:''}`;
 }
+async function addNewSong(q,user,room){
+  const reply=await gasText('chat_add',{user,q,channel:room,room});
+  songsCache=[];
+  songsCacheAt=0;
+  return reply;
+}
 
 async function say(msg){
   let text=clean(msg).slice(0,430);if(!text||!me||!broadcaster)return;
@@ -148,6 +188,7 @@ async function say(msg){
 async function handleChat(event){
   if(!event)return;
   const user=clean(event.chatter_user_name||event.chatter_user_login||'chat');
+  const userLogin=norm(event.chatter_user_login||event.chatter_user_name||'chat');
   const room=broadcaster.login.toLowerCase();
   const text=clean(event.message?.text||'');
   log('CHAT_IN',user,text);
@@ -155,6 +196,32 @@ async function handleChat(event){
   if(text==='!bot健康'||text==='!bothealth'){
     try{const all=await getSongs(true);await say(`@${user} bot在線，Twitch監聽正常，歌單 ${all.length} 首`)}
     catch(e){log('GAS_ERROR',e.message);await say(`@${user} bot在線，但 GAS 失敗：${clean(e.message)}`)}
+    return;
+  }
+
+  if(text==='!新增點歌'){
+    if(!canAddSong(userLogin)){
+      await say(`@${user} 你沒有權限使用 !新增點歌`);
+      return;
+    }
+    await say(`@${user} 請輸入歌名，例如：!新增點歌 青花瓷`);
+    return;
+  }
+
+  if(text.startsWith('!新增點歌 ')){
+    if(!canAddSong(userLogin)){
+      await say(`@${user} 你沒有權限使用 !新增點歌`);
+      return;
+    }
+    const q=clean(text.slice('!新增點歌 '.length));
+    if(!q)return;
+    try{
+      const reply=await addNewSong(q,userLogin,room);
+      await say(reply || `@${user} 已新增歌曲：${q}`);
+    }catch(e){
+      log('ADD_SONG_ERROR',e.message);
+      await say(`@${user} 新增歌曲失敗：${clean(e.message)}`);
+    }
     return;
   }
 
@@ -187,7 +254,10 @@ async function handleChat(event){
     try{
       const all=await getSongs();
       const found=findSongs(all,q);
-      if(!found.length){await say(`@${user} 找不到「${q}」`);return;}
+      if(!found.length){
+        await say(`@${user} 找不到「${q}」，請噗妮妮輸入：!新增點歌 ${q}`);
+        return;
+      }
       if(found.length===1){await say(await addSong(found[0],user));return;}
       pendingChoices.set(choiceKey(room,user),{items:found,at:Date.now()});
       const menu=found.map((s,i)=>`#${i+1} ${s.title}${s.artist?`-${s.artist}`:''}`).join('｜');
